@@ -5,6 +5,15 @@ on:
     branches:
       - testing
 
+# Define global environment variables that can be used across jobs
+env:
+  # ACR Login Server (e.g., myregistry.azurecr.io)
+  # This needs to be set as a GitHub Repository Secret
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  # Dynamically generate image tags based on Git SHA and GitHub Run ID
+  # This provides unique, traceable tags for each image build
+  IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
+
 jobs:
   # Job 1: Run tests and linting for all backend services
   test_and_lint_backends:
@@ -26,7 +35,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-      
+
       # Order DB
       order_db:
         image: postgres:15
@@ -66,7 +75,7 @@ jobs:
       - name: Set up Python 3.10
         uses: actions/setup-python@v5 # Action to set up Python environment
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       # 3. Install dependencies and run code quality checkss
       - name: Install dependencies
@@ -91,7 +100,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
         run: |
           pytest tests --maxfail=1 --disable-warnings -q
-      
+
       # 6. Run tests for order service
       - name: Run order_service tests
         working-directory: backend/order_service
@@ -121,39 +130,38 @@ jobs:
     needs: test_and_lint_backends
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # Azure login using a Service Principal secret
-    - name: Azure Login
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }} # Needs to be set as a GitHub Secret (Service Principal JSON)
+      # Azure login using a Service Principal secret
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }} # Needs to be set as a GitHub Secret (Service Principal JSON)
 
-    # Login to Azure Container Registry (ACR)
-    - name: Login to Azure Container Registry
-      run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
+      # Login to Azure Container Registry (ACR)
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
 
-    # Build and Push Docker image for Product Services
-    - name: Build and Push Product Service Image
-      run: |
-        docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:latest ./backend/product_service/
-        docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
+      # Build and Push Docker image for Product Services
+      - name: Build and Push Product Service Image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/product_service:latest ./backend/product_service/
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/product_service:latest
 
-    # Build and Push Docker image for Order Service
-    - name: Build and Push Order Service Image
-      run: |
-        docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service/
-        docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
+      # Build and Push Docker image for Order Service
+      - name: Build and Push Order Service Image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service/
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest
 
-    # Build and Push Docker image for Frontend
-    - name: Build and Push Frontend Images
-      working-directory: frontend
-      run: |
-        docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} .
-        docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
-    # Logout from Azure for security (runs even if image push fails)s
-    - name: Logout from Azure
-      run: az logout
-      if: always()
-
+      # Build and Push Docker image for Frontend
+      - name: Build and Push Frontend Images
+        working-directory: frontend
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} .
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+      # Logout from Azure for security (runs even if image push fails)s
+      - name: Logout from Azure
+        run: az logout
+        if: always()
