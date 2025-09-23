@@ -100,40 +100,45 @@ jobs:
           POSTGRES_PASSWORD: postgres
         run: |
           pytest tests --maxfail=1 --disable-warnings -q
-  build-and-push:
+  # Job 2: Build and Push Docker Images (runs only if tests pass)
+  build_and_push_images:
     runs-on: ubuntu-latest
-    needs: [test_and_lint_backends]
+    needs: test_and_lint_backends
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Log in to Azure Container Registry
-        uses: azure/docker-login@v1
-        with:
-          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
+    # Azure login using a Service Principal secret
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }} # Needs to be set as a GitHub Secret (Service Principal JSON)
 
-      - name: Build and push product_service image
-        working-directory: backend/product_service
-        run: |
-          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/product-service:${{ github.sha }} .
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/product-service:${{ github.sha }}
+    # Login to Azure Container Registry (ACR)
+    - name: Login to Azure Container Registry
+      run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
 
-      - name: Build and push order_service image
-        working-directory: backend/order_service
-        run: |
-          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/order-service:${{ github.sha }} .
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/order-service:${{ github.sha }}
+    # Build and Push Docker image for Product Services
+    - name: Build and Push Product Service Image
+      run: |
+        docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:latest ./backend/product_service/
+        docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
 
-      - name: Build and push customer_service image
-        working-directory: backend/customer_service
-        run: |
-          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/customer-service:${{ github.sha }} .
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/customer-service:${{ github.sha }}
+    # Build and Push Docker image for Order Service
+    - name: Build and Push Order Service Image
+      run: |
+        docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service/
+        docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
 
-      - name: Build and push frontend image
-        working-directory: frontend
-        run: |
-          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} .
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+    # Build and Push Docker image for Frontend
+    - name: Build and Push Frontend Image
+      working-directory: frontend
+      run: |
+        docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} .
+        docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+    # Logout from Azure for security (runs even if image push fails)s
+    - name: Logout from Azure
+      run: az logout
+      if: always()
+
