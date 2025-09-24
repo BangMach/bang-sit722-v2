@@ -1,0 +1,56 @@
+name: CD Pipeline - Production Environment
+
+on:
+  workflow_run:
+    workflows:
+      - CD Pipeline - Staging Environment
+    types:
+      - completed
+
+jobs:
+  deploy_to_production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Azure Login
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Step 3: Set Kubernetes Context for Production
+      - name: Set Kubernetes Context
+        run: |
+          az aks get-credentials --resource-group ${{ secrets.PRODUCTION_RESOURCE_GROUP }} \
+                                  --name ${{ secrets.PRODUCTION_AKS_CLUSTER }} \
+                                  --overwrite-existing
+
+      # Step 4: Deploy to Production
+      - name: Deploy to Production
+        run: |
+          kubectl apply -f k8s/product-service.yaml
+          kubectl apply -f k8s/order-service.yaml
+          kubectl apply -f k8s/customer-service.yaml
+
+      # Step 5: Monitor Deployment
+      - name: Monitor Deployment
+        run: |
+          kubectl get pods --namespace default
+          kubectl get services --namespace default
+
+      # Step 6: Rollback on Failure
+      - name: Rollback on Failure
+        if: failure()
+        run: |
+          echo "Deployment failed. Rolling back to previous version..."
+          kubectl rollout undo deployment product-service
+          kubectl rollout undo deployment order-service
+          kubectl rollout undo deployment customer-service
