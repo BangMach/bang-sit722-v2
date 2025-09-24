@@ -1,20 +1,13 @@
 name: Multi-Stage Deployment
 
 on:
+  workflow_run:
+    workflows:
+      - CI Pipeline
+    types:
+      - completed
+
   workflow_dispatch:
-    inputs:
-      STAGING_RESOURCE_GROUP:
-        description: "Resource group for staging environment"
-        required: true
-      STAGING_AKS_CLUSTER:
-        description: "AKS cluster name for staging"
-        required: true
-      PRODUCTION_RESOURCE_GROUP:
-        description: "Resource group for production environment"
-        required: true
-      PRODUCTION_AKS_CLUSTER:
-        description: "AKS cluster name for production"
-        required: true
 
 jobs:
   azure_login:
@@ -24,7 +17,29 @@ jobs:
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
 
+  # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
+  deploy_to_staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: azure_login
+
+    steps:
+      - name: Set Kubernetes Context for Staging
+        run: |
+          az aks get-credentials --resource-group ${{ secrets.STAGING_RESOURCE_GROUP }} --name ${{ secrets.STAGING_AKS_CLUSTER }} --overwrite-existing
+
+      - name: Deploy to Staging
+        run: |
+          kubectl apply -f week05/k8s/order-service.yaml
+          kubectl apply -f week05/k8s/product-service.yaml
+          kubectl apply -f week05/k8s/customer-service.yaml
+
+      - name: Monitor Staging Deployment
+        run: |
+          kubectl get pods --namespace default
+          kubectl get services --namespace default
   deploy_staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
