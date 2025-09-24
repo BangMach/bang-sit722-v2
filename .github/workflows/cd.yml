@@ -141,7 +141,7 @@ jobs:
 
 
       - name: Wait for Manual Testing
-        run: echo "Pausing for 5 minutes..."; sleep 300
+        run: echo "Pausing for 2 minutes..."; sleep 120
 
       - name: Destroy Staging Environment
         run: |
@@ -150,10 +150,6 @@ jobs:
           kubectl delete -f product-service.yaml
           kubectl delete -f customer-service.yaml
           kubectl delete -f frontend.yaml
-          kubectl delete -f order-service-substituted.yaml
-          kubectl delete -f product-service-substituted.yaml
-          kubectl delete -f customer-service-substituted.yaml
-          kubectl delete -f frontend-substituted.yaml
           kubectl delete -f configmaps.yaml
           kubectl delete -f secrets.yaml
           kubectl delete -f product-db.yaml
