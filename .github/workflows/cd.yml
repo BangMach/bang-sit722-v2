@@ -59,7 +59,6 @@ jobs:
           kubectl apply -f order-service-substituted.yaml
           kubectl apply -f customer-service-substituted.yaml
 
-          
       - name: Wait for Backend LoadBalancer IPs
         run: |
           echo "Waiting for LoadBalancer IPs..."
@@ -92,13 +91,11 @@ jobs:
           echo "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
           echo "Captured ORDER_API_IP: http://${{ env.ORDER_IP }}:8001"
 
-
       # Build and Push Docker image for Frontend
       - name: Build and Push Frontend Image
         run: |
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
           docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
-
 
       - name: Substitute ACR in YAML
         run: |
