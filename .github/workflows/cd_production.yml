@@ -1,11 +1,6 @@
 name: CD Pipeline - Production Environment
 
 on:
-  workflow_run:
-    workflows:
-      - CD Pipeline - Staging Environment
-    types:
-      - completed
   pull_request:
     types:
       - closed
@@ -15,12 +10,10 @@ jobs:
   deploy_to_production:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    if: >
-        (github.event.workflow_run.conclusion == 'success' &&
-        github.event.pull_request.merged == true) ||
-        (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event.pull_request.merged == true # Ensure the pull request was merged
+
     steps:
-      # Step 1: Checkout the repositories
+      # Step 1: Checkout the repositories delulu
       - name: Checkout Code
         uses: actions/checkout@v4
 
