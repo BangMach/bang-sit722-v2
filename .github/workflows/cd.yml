@@ -104,25 +104,7 @@ jobs:
         run: |
           echo "external_ip=http://${{ env.CUSTOMER_IP }}:8002" >> $GITHUB_OUTPUT
           echo "Captured CUSTOMER_API_IP: http://${{ env.CUSTOMER_IP }}:8002"
-        ################################################################################
-      - name: Build and Push Frontend Image
-        run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
-
-      - name: Substitute ACR in YAML
-        run: |
-          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
-          envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
-
-      - name: Deploy Frontend to AKS
-        run: |
-          echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
-          cd k8s/
-          # Ensure frontend-service.yaml is configured with your ACR
-          kubectl apply -f frontend-substituted.yaml
-        ################################################################################
-        # Login to Azure Container Registry (ACR)
+      # Login to Azure Container Registry (ACR)
       - name: Login to Azure Container Registry
         run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
@@ -150,13 +132,13 @@ jobs:
         run: |
           export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
           envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
-
       - name: Deploy Frontend to AKS
         run: |
-          echo "Deploying frontend with latest tag to AKS cluster:${{ secrets.STAGING_AKS_CLUSTER }}"
+          echo "Deploying frontend with latest tag to AKS cluster: ${{ secrets.STAGING_AKS_CLUSTER }}"
           cd k8s/
           # Ensure frontend-service.yaml is configured with your ACR
           kubectl apply -f frontend-substituted.yaml
+
 
       - name: Wait for Manual Testing
         run: echo "Pausing for 5 minutes..."; sleep 300
