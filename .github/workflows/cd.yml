@@ -68,9 +68,9 @@ jobs:
         run: |
           echo "Waiting for LoadBalancer IPs..."
           for i in {1..10}; do  # Retry up to 10 times
-            PRODUCT_IP=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-            ORDER_IP=$(kubectl get svc order-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-            CUSTOMER_IP=$(kubectl get svc customer-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            PRODUCT_IP=$(kubectl get svc product-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            ORDER_IP=$(kubectl get svc order-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            CUSTOMER_IP=$(kubectl get svc customer-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 
             if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ] && [ -n "$CUSTOMER_IP" ]; then
               echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
