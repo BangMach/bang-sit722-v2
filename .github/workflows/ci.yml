@@ -5,7 +5,7 @@ on:
     branches:
       - testing
 
-# Define global environment variables that can be used across jobs
+# Define global environment variables that can be used across jobsm
 env:
   # ACR Login Server (e.g., myregistry.azurecr.io)
   # This needs to be set as a GitHub Repository Secret
@@ -165,4 +165,3 @@ jobs:
       - name: Logout from Azure
         run: az logout
         if: always()
-
