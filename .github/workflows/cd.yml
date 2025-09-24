@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+
       - name: Azure Login
         uses: azure/login@v1
         with:
@@ -51,6 +51,8 @@ jobs:
           kubectl apply -f secrets.yaml
           kubectl apply -f product-db.yaml
           kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
+
 
       - name: Deploy Backend Microservices (Product, Order, Customer ) to Stagging
         run: |
@@ -69,7 +71,8 @@ jobs:
             if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ]; then
               echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
               echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
-              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP"
+              echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP, CUSTOMER_IP=$CUSTOMER_IP"
               break
             fi
             echo "Attempt $i: IPs not ready yet. Retrying in 30s..."
@@ -92,7 +95,12 @@ jobs:
           echo "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
           echo "Captured ORDER_API_IP: http://${{ env.ORDER_IP }}:8001"
 
-      # Build and Push Docker image for Frontend
+      - name: Capture Customer Service IP for Workflow Output
+        id: get_customer_ip
+        run: |
+          echo "external_ip=http://${{ env.CUSTOMER_IP }}:8002" >> $GITHUB_OUTPUT
+          echo "Captured CUSTOMER_API_IP: http://${{ env.CUSTOMER_IP }}:8002"
+        ################################################################################
       - name: Build and Push Frontend Image
         run: |
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
@@ -102,6 +110,9 @@ jobs:
         run: |
           export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
           envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
+
+
+          
       - name: Deploy Frontend to AKS
         run: |
           echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
