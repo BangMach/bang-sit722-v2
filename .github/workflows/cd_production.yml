@@ -13,7 +13,6 @@ jobs:
     if: github.event.pull_request.merged == true # Ensure the pull request was merged
 
     steps:
-      # Step 1: Checkout the repository
       - name: Checkout Code
         uses: actions/checkout@v4
 
