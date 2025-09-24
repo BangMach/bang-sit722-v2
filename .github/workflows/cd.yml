@@ -6,6 +6,8 @@ on:
       - CI Pipeline
     types:
       - completed
+    branches: 
+      - testing
   workflow_dispatch:
     inputs:
       STAGING_RESOURCE_GROUP:
@@ -80,7 +82,7 @@ jobs:
             echo "Attempt $i: IPs not ready yet. Retrying in 30s..."
             sleep 30
           done
-          if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ]; then
+          if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ] || [ -z "$CUSTOMER_IP" ]; then
             echo "Error: Failed to retrieve LoadBalancer IPs after retries"
             exit 1
           fi
