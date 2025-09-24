@@ -6,26 +6,31 @@ on:
       - CI Pipeline
     types:
       - completed
-
+    branches:
+      - testing
   workflow_dispatch:
-
+    inputs:
+      STAGING_RESOURCE_GROUP:
+        description: "Resource group for staging environment"
+        required: true
+      STAGING_AKS_CLUSTER:
+        description: "AKS cluster name for staging"
+        required: true
 jobs:
-  azure_login:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
-
   # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
   deploy_staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
-    needs: azure_login
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
       - name: Update Azure CLI
         run: az upgrade --yes
 
@@ -33,27 +38,82 @@ jobs:
         run: |
           az aks get-credentials --resource-group ${{ secrets.STAGING_RESOURCE_GROUP }} --name ${{ secrets.STAGING_AKS_CLUSTER }} --overwrite-existing
 
-      - name: Deploy to Staging
+      - name: Substitute ACR in YAML
         run: |
-          kubectl apply -f task10_2d/k8s/order-service.yaml
-          kubectl apply -f task10_2d/k8s/product-service.yaml
-          kubectl apply -f task10_2d/k8s/customer-service.yaml
+          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          envsubst < k8s/product-service.yaml > k8s/product-service-substituted.yaml
+          envsubst < k8s/order-service.yaml > k8s/order-service-substituted.yaml
+          envsubst < k8s/customer-service.yaml > k8s/customer-service-substituted.yaml
 
-      # Build and Push Docker image for Frontend
+      - name: Deploy Backend Infrastructure (Namespace, ConfigMaps, Secrets, Databases)
+        run: |
+          echo "Deploying backend infrastructure..."
+          cd k8s/
+          kubectl apply -f configmaps.yaml
+          kubectl apply -f secrets.yaml
+          kubectl apply -f product-db.yaml
+          kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
+
+      - name: Deploy Backend Microservices (Product, Order, Customer ) to Stagging
+        run: |
+          echo "Deploying backend microservices..."
+          cd k8s/
+          kubectl apply -f product-service-substituted.yaml
+          kubectl apply -f order-service-substituted.yaml
+          kubectl apply -f customer-service-substituted.yaml
+
+      - name: Wait for Backend LoadBalancer IPs
+        run: |
+          echo "Waiting for LoadBalancer IPs..."
+          for i in {1..10}; do  # Retry up to 10 times
+            PRODUCT_IP=$(kubectl get svc product-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            ORDER_IP=$(kubectl get svc order-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            CUSTOMER_IP=$(kubectl get svc customer-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+
+            if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ] && [ -n "$CUSTOMER_IP" ]; then
+              echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+              echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
+              echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP, CUSTOMER_IP=$CUSTOMER_IP"
+              break
+            fi
+            echo "Attempt $i: IPs not ready yet. Retrying in 30s..."
+            sleep 30
+          done
+          if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ] || [ -z "$CUSTOMER_IP" ]; then
+            echo "Error: Failed to retrieve LoadBalancer IPs after retries"
+            exit 1
+          fi
+
+      - name: Capture Product Service IP for Workflow Output
+        id: get_product_ip
+        run: |
+          echo "external_ip=http://${{ env.PRODUCT_IP }}:8000" >> $GITHUB_OUTPUT
+          echo "Captured PRODUCT_API_IP: http://${{ env.PRODUCT_IP }}:8000"
+
+      - name: Capture Order Service IP for Workflow Output
+        id: get_order_ip
+        run: |
+          echo "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
+          echo "Captured ORDER_API_IP: http://${{ env.ORDER_IP }}:8001"
+
+      - name: Capture Customer Service IP for Workflow Output
+        id: get_customer_ip
+        run: |
+          echo "external_ip=http://${{ env.CUSTOMER_IP }}:8002" >> $GITHUB_OUTPUT
+          echo "Captured CUSTOMER_API_IP: http://${{ env.CUSTOMER_IP }}:8002"
+        ################################################################################
       - name: Build and Push Frontend Image
         run: |
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
           docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
 
-      - name: Set Kubernetes context (get AKS credentials)
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ inputs.aks_resource_group }}
-          cluster-name: ${{ inputs.aks_cluster_name }}
       - name: Substitute ACR in YAML
         run: |
           export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
           envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
+
       - name: Deploy Frontend to AKS
         run: |
           echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
@@ -70,26 +130,27 @@ jobs:
           kubectl delete -f task10_2d/k8s/product-service.yaml
           kubectl delete -f task10_2d/k8s/customer-service.yaml
 
-#   deploy_production:
-#     name: Deploy to Production
-#     runs-on: ubuntu-latest
-#     needs: deploy_staging
-#     if: github.ref == 'refs/heads/main'
-#     steps:
-#       - name: Checkout Code
-#         uses: actions/checkout@v4
+  deploy_production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy_staging
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-#       - name: Set Kubernetes Context for Production
-#         run: |
-#           az aks get-credentials --resource-group ${{ inputs.PRODUCTION_RESOURCE_GROUP }} --name ${{ inputs.PRODUCTION_AKS_CLUSTER }} --overwrite-existing
+      - name: Set Kubernetes Context for Production
+        run: |
+          az aks get-credentials --resource-group ${{ inputs.PRODUCTION_RESOURCE_GROUP }} --name ${{ inputs.PRODUCTION_AKS_CLUSTER }} --overwrite-existing
 
-#       - name: Deploy to Production
-#         run: |
-#           kubectl apply -f week05/k8s/order-service.yaml
-#           kubectl apply -f week05/k8s/product-service.yaml
-#           kubectl apply -f week05/k8s/customer-service.yaml
+      - name: Deploy to Production
+        run: |
+          kubectl apply -f week05/k8s/order-service.yaml
+          kubectl apply -f week05/k8s/product-service.yaml
+          kubectl apply -f week05/k8s/customer-service.yaml
 
-#       - name: Monitor Deployment
-#         run: |
-#           kubectl get pods --namespace default
-#           kubectl get services --namespace default
+      - name: Monitor Deployment
+        run: |
+          kubectl get pods --namespace default
+          kubectl get services --namespace default
+          kubectl get services --namespace default
