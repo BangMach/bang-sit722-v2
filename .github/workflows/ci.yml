@@ -13,7 +13,7 @@ env:
   # Dynamically generate image tags based on Git SHA and GitHub Run ID
   # This provides unique, traceable tags for each image build
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
-  
+
 jobs:
   # Job 1: Run tests and linting for all backend services
   test_and_lint_backends:
@@ -35,7 +35,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-      
+
       # Order DB
       order_db:
         image: postgres:15
@@ -75,7 +75,7 @@ jobs:
       - name: Set up Python 3.10
         uses: actions/setup-python@v5 # Action to set up Python environment
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       # 3. Install dependencies and run code quality checkss
       - name: Install dependencies
@@ -100,7 +100,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
         run: |
           pytest tests --maxfail=1 --disable-warnings -q
-      
+
       # 6. Run tests for order service
       - name: Run order_service tests
         working-directory: backend/order_service
@@ -130,39 +130,77 @@ jobs:
     needs: test_and_lint_backends
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # Azure login using a Service Principal secret
-    - name: Azure Login
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }} # Needs to be set as a GitHub Secret (Service Principal JSON)
+      # Azure login using a Service Principal secret
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }} # Needs to be set as a GitHub Secret (Service Principal JSON)
 
-    # Login to Azure Container Registry (ACR)
-    - name: Login to Azure Container Registry
-      run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
+      # Login to Azure Container Registry (ACR)
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
 
-    # Build and Push Docker image for Product Services
-    - name: Build and Push Product Service Image
-      run: |
-        docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/product_service:latest ./backend/product_service/
-        docker push ${{ secrets.ACR_LOGIN_SERVER }}/product_service:latest
+      # Build and Push Docker image for Product Services
+      - name: Build and Push Product Service Image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/product_service:latest ./backend/product_service/
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/product_service:latest
 
-    # Build and Push Docker image for Order Service
-    - name: Build and Push Order Service Image
-      run: |
-        docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service/
-        docker push ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest
+      # Build and Push Docker image for Order Service
+      - name: Build and Push Order Service Image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service/
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest
 
-    # Build and Push Docker image for Frontend
-    - name: Build and Push Frontend Images
-      working-directory: frontend
-      run: |
-        docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest .
-        docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
-    # Logout from Azure for security (runs even if image push fails)
-    - name: Logout from Azure
-      run: az logout
-      if: always()
+      # Build and Push Docker image for Frontend
+      - name: Build and Push Frontend Images
+        working-directory: frontend
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest .
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
 
+      # Login to Azure Container Registry (ACR)
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Inject Backend IPs into Frontend main.js
+        run: |
+          echo "Injecting IPs into frontend/main.js"
+          sed -i "s|_PRODUCT_API_URL_|${{ inputs.product_api_ip }}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${{ inputs.order_api_ip }}|g" frontend/main.js
+          # Validate replacement
+          if grep -q "_PRODUCT_API_URL_" frontend/main.js || grep -q "_ORDER_API_URL_" frontend/main.js; then
+            echo "Error: Placeholders not replaced. Check inputs: product_api_ip=${{ inputs.product_api_ip }}, order_api_ip=${{ inputs.order_api_ip }}"
+            exit 1
+          fi
+          echo "Replacement successful. PRODUCT_API_BASE_URL: $(grep 'PRODUCT_API_BASE_URL' frontend/main.js)"
+
+      # Build and Push Docker image for Frontend
+      - name: Build and Push Frontend Image
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
+
+      - name: Set Kubernetes context (get AKS credentials)
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ inputs.aks_resource_group }}
+          cluster-name: ${{ inputs.aks_cluster_name }}
+      - name: Substitute ACR in YAML
+        run: |
+          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
+      - name: Deploy Frontend to AKS
+        run: |
+          echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
+          cd k8s/
+          # Ensure frontend-service.yaml is configured with your ACR
+          kubectl apply -f frontend-substituted.yaml
+
+      # Logout from Azure for security (runs even if image push fails)
+      - name: Logout from Azure
+        run: az logout
+        if: always()

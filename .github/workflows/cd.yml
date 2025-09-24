@@ -15,7 +15,6 @@ jobs:
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
 
   # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
   deploy_staging:
@@ -28,7 +27,6 @@ jobs:
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
 
       - name: Update Azure CLI
         run: az upgrade --yes
@@ -61,17 +59,47 @@ jobs:
           kubectl apply -f order-service-substituted.yaml
           kubectl apply -f customer-service-substituted.yaml
 
+          
+      - name: Wait for Backend LoadBalancer IPs
+        run: |
+          echo "Waiting for LoadBalancer IPs..."
+          for i in {1..10}; do  # Retry up to 10 times
+            PRODUCT_IP=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            ORDER_IP=$(kubectl get svc order-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ]; then
+              echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+              echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
+              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP"
+              break
+            fi
+            echo "Attempt $i: IPs not ready yet. Retrying in 30s..."
+            sleep 30
+          done
+          if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ]; then
+            echo "Error: Failed to retrieve LoadBalancer IPs after retries"
+            exit 1
+          fi
+
+      - name: Capture Product Service IP for Workflow Output
+        id: get_product_ip
+        run: |
+          echo "external_ip=http://${{ env.PRODUCT_IP }}:8000" >> $GITHUB_OUTPUT
+          echo "Captured PRODUCT_API_IP: http://${{ env.PRODUCT_IP }}:8000"
+
+      - name: Capture Order Service IP for Workflow Output
+        id: get_order_ip
+        run: |
+          echo "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
+          echo "Captured ORDER_API_IP: http://${{ env.ORDER_IP }}:8001"
+
+
       # Build and Push Docker image for Frontend
       - name: Build and Push Frontend Image
         run: |
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
           docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
 
-      - name: Set Kubernetes context (get AKS credentials)
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ inputs.aks_resource_group }}
-          cluster-name: ${{ inputs.aks_cluster_name }}
+
       - name: Substitute ACR in YAML
         run: |
           export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
@@ -114,4 +142,5 @@ jobs:
       - name: Monitor Deployment
         run: |
           kubectl get pods --namespace default
+          kubectl get services --namespace default
           kubectl get services --namespace default
