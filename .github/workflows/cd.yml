@@ -126,6 +126,21 @@ jobs:
       - name: Login to Azure Container Registry
         run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
+      - name: Inject Backend IPs into Frontend main.js
+        run: |
+          echo "Injecting IPs into frontend/main.js"
+          sed -i "s|_PRODUCT_API_URL_|http://${{ env.PRODUCT_IP }}:8000|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|http://${{ env.ORDER_IP }}:8001|g" frontend/main.js
+          sed -i "s|_CUSTOMER_API_URL_|http://${{ env.CUSTOMER_IP }}:8002|g" frontend/main.js
+          # Validate replacement
+          if grep -q "_PRODUCT_API_URL_" frontend/main.js || grep -q "_ORDER_API_URL_" frontend/main.js || grep -q "_CUSTOMER_API_URL_" frontend/main.js; then
+            echo "Error: Placeholders not replaced. Check environment variables: PRODUCT_IP=${{ env.PRODUCT_IP }}, ORDER_IP=${{ env.ORDER_IP }}, CUSTOMER_IP=${{ env.CUSTOMER_IP }}"
+            exit 1
+          fi
+            echo "Replacement successful."
+            echo "PRODUCT_API_BASE_URL: $(grep 'PRODUCT_API_BASE_URL' frontend/main.js)"
+            echo "ORDER_API_BASE_URL: $(grep 'ORDER_API_BASE_URL' frontend/main.js)"
+            echo "CUSTOMER_API_BASE_URL: $(grep 'CUSTOMER_API_BASE_URL' frontend/main.js)"
       - name: Build and Push Frontend Image
         run: |
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
@@ -152,6 +167,10 @@ jobs:
           kubectl delete -f product-service.yaml
           kubectl delete -f customer-service.yaml
           kubectl delete -f frontend.yaml
+          kubectl delete -f order-service-substituted.yaml
+          kubectl delete -f product-service-substituted.yaml
+          kubectl delete -f customer-service-substituted.yaml
+          kubectl delete -f frontend-substituted.yaml
           kubectl delete -f configmaps.yaml
           kubectl delete -f secrets.yaml
           kubectl delete -f product-db.yaml
