@@ -159,8 +159,8 @@ jobs:
       - name: Build and Push Frontend Images
         working-directory: frontend
         run: |
-          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} .
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest ./frontend/
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
       # Logout from Azure for security (runs even if image push fails)s
       - name: Logout from Azure
         run: az logout
