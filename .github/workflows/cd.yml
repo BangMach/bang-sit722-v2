@@ -25,6 +25,15 @@ jobs:
     needs: azure_login
 
     steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
+
+      - name: Update Azure CLI
+        run: az upgrade --yes
+
       - name: Set Kubernetes Context for Staging
         run: |
           az aks get-credentials --resource-group ${{ secrets.STAGING_RESOURCE_GROUP }} --name ${{ secrets.STAGING_AKS_CLUSTER }} --overwrite-existing
