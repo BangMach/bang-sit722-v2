@@ -15,20 +15,10 @@ on:
         description: "AKS cluster name for staging"
         required: true
 jobs:
-  azure_login:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
   # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
   deploy_staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
-    needs: azure_login
-
     steps:
       - name: Azure Login
         uses: azure/login@v1
