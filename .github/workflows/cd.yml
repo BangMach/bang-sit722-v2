@@ -139,12 +139,12 @@ jobs:
           # Ensure frontend-service.yaml is configured with your ACR
           kubectl apply -f frontend-substituted.yaml
 
-
       - name: Wait for Manual Testing
         run: echo "Pausing for 5 minutes..."; sleep 300
 
       - name: Destroy Staging Environment
         run: |
+          cd k8s/
           kubectl delete -f order-service.yaml
           kubectl delete -f product-service.yaml
           kubectl delete -f customer-service.yaml
