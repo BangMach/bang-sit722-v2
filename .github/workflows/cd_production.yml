@@ -24,7 +24,7 @@ jobs:
       - name: Azure Login
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ secrets.AZURE_CREDENTIALS_PRODUCTION }}
 
       # Step 3: Set Kubernetes Context for Production
       - name: Set Kubernetes Context
@@ -33,12 +33,105 @@ jobs:
                                   --name ${{ secrets.PRODUCTION_AKS_CLUSTER }} \
                                   --overwrite-existing
 
-      # Step 4: Deploy to Production
-      - name: Deploy to Production
+      - name: Substitute ACR in YAML
         run: |
-          kubectl apply -f k8s/product-service.yaml
-          kubectl apply -f k8s/order-service.yaml
-          kubectl apply -f k8s/customer-service.yaml
+          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          envsubst < k8s/product-service.yaml > k8s/product-service-substituted.yaml
+          envsubst < k8s/order-service.yaml > k8s/order-service-substituted.yaml
+          envsubst < k8s/customer-service.yaml > k8s/customer-service-substituted.yaml
+
+      - name: Deploy Backend Infrastructure (Namespace, ConfigMaps, Secrets, Databases)
+        run: |
+          echo "Deploying backend infrastructure..."
+          cd k8s/
+          kubectl apply -f configmaps.yaml
+          kubectl apply -f secrets.yaml
+          kubectl apply -f product-db.yaml
+          kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
+
+      - name: Deploy Backend Microservices (Product, Order, Customer ) to Stagging
+        run: |
+          echo "Deploying backend microservices..."
+          cd k8s/
+          kubectl apply -f product-service-substituted.yaml
+          kubectl apply -f order-service-substituted.yaml
+          kubectl apply -f customer-service-substituted.yaml
+
+      - name: Wait for Backend LoadBalancer IPs
+        run: |
+          echo "Waiting for LoadBalancer IPs..."
+          for i in {1..10}; do  # Retry up to 10 times
+            PRODUCT_IP=$(kubectl get svc product-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            ORDER_IP=$(kubectl get svc order-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            CUSTOMER_IP=$(kubectl get svc customer-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+
+            if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ] && [ -n "$CUSTOMER_IP" ]; then
+              echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+              echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
+              echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP, CUSTOMER_IP=$CUSTOMER_IP"
+              break
+            fi
+            echo "Attempt $i: IPs not ready yet. Retrying in 30s..."
+            sleep 30
+          done
+          if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ] || [ -z "$CUSTOMER_IP" ]; then
+            echo "Error: Failed to retrieve LoadBalancer IPs after retries"
+            exit 1
+          fi
+
+      - name: Capture Product Service IP for Workflow Output
+        id: get_product_ip
+        run: |
+          echo "external_ip=http://${{ env.PRODUCT_IP }}:8000" >> $GITHUB_OUTPUT
+          echo "Captured PRODUCT_API_IP: http://${{ env.PRODUCT_IP }}:8000"
+
+      - name: Capture Order Service IP for Workflow Output
+        id: get_order_ip
+        run: |
+          echo "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
+          echo "Captured ORDER_API_IP: http://${{ env.ORDER_IP }}:8001"
+
+      - name: Capture Customer Service IP for Workflow Output
+        id: get_customer_ip
+        run: |
+          echo "external_ip=http://${{ env.CUSTOMER_IP }}:8002" >> $GITHUB_OUTPUT
+          echo "Captured CUSTOMER_API_IP: http://${{ env.CUSTOMER_IP }}:8002"
+      # Login to Azure Container Registry (ACR)
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Inject Backend IPs into Frontend main.js
+        run: |
+          echo "Injecting IPs into frontend/main.js"
+          sed -i "s|_PRODUCT_API_URL_|http://${{ env.PRODUCT_IP }}:8000|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|http://${{ env.ORDER_IP }}:8001|g" frontend/main.js
+          sed -i "s|_CUSTOMER_API_URL_|http://${{ env.CUSTOMER_IP }}:8002|g" frontend/main.js
+          # Validate replacement
+          if grep -q "_PRODUCT_API_URL_" frontend/main.js || grep -q "_ORDER_API_URL_" frontend/main.js || grep -q "_CUSTOMER_API_URL_" frontend/main.js; then
+            echo "Error: Placeholders not replaced. Check environment variables: PRODUCT_IP=${{ env.PRODUCT_IP }}, ORDER_IP=${{ env.ORDER_IP }}, CUSTOMER_IP=${{ env.CUSTOMER_IP }}"
+            exit 1
+          fi
+            echo "Replacement successful."
+            echo "PRODUCT_API_BASE_URL: $(grep 'PRODUCT_API_BASE_URL' frontend/main.js)"
+            echo "ORDER_API_BASE_URL: $(grep 'ORDER_API_BASE_URL' frontend/main.js)"
+            echo "CUSTOMER_API_BASE_URL: $(grep 'CUSTOMER_API_BASE_URL' frontend/main.js)"
+      - name: Build and Push Frontend Image
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
+
+      - name: Substitute ACR in YAML
+        run: |
+          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
+      - name: Deploy Frontend to AKS
+        run: |
+          echo "Deploying frontend with latest tag to AKS cluster: ${{ secrets.STAGING_AKS_CLUSTER }}"
+          cd k8s/
+          # Ensure frontend-service.yaml is configured with your ACR
+          kubectl apply -f frontend-substituted.yaml
 
       # Step 5: Monitor Deployment
       - name: Monitor Deployment
