@@ -145,7 +145,7 @@ jobs:
 
       - name: Destroy Staging Environment
         run: |
-          cd task10_2d/k8s/
+          cd k8s/
           kubectl delete -f order-service.yaml
           kubectl delete -f product-service.yaml
           kubectl delete -f customer-service.yaml
