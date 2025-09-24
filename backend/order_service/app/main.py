@@ -9,12 +9,6 @@ import time
 from decimal import Decimal
 from typing import List, Optional
 
-import aio_pika
-import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, joinedload
 
 from .db import Base, SessionLocal, engine, get_db
 from .models import Order, OrderItem
@@ -39,7 +33,8 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 
 # --- Service URLs Configuration ---
-CUSTOMER_SERVICE_URL = os.getenv("CUSTOMER_SERVICE_URL", "http://localhost:8002")
+CUSTOMER_SERVICE_URL = os.getenv(
+    "CUSTOMER_SERVICE_URL", "http://localhost:8002")
 logger.info(
     f"Order Service: Configured to communicate with Customer Service at: {CUSTOMER_SERVICE_URL}"
 )
@@ -100,7 +95,8 @@ async def connect_to_rabbitmq():
             )
             return True
         except Exception as e:
-            logger.warning(f"Order Service: Failed to connect to RabbitMQ: {e}")
+            logger.warning(
+                f"Order Service: Failed to connect to RabbitMQ: {e}")
             if i < max_retries - 1:
                 await asyncio.sleep(retry_delay_seconds)
             else:
@@ -277,7 +273,8 @@ async def startup_event():
             )
             break  # Exit loop if successful
         except OperationalError as e:
-            logger.warning(f"Order Service: Failed to connect to PostgreSQL: {e}")
+            logger.warning(
+                f"Order Service: Failed to connect to PostgreSQL: {e}")
             if i < max_retries - 1:
                 logger.info(
                     f"Order Service: Retrying in {retry_delay_seconds} seconds..."
@@ -287,7 +284,8 @@ async def startup_event():
                 logger.critical(
                     f"Order Service: Failed to connect to PostgreSQL after {max_retries} attempts. Exiting application."
                 )
-                sys.exit(1)  # Critical failure: exit if DB connection is unavailable
+                # Critical failure: exit if DB connection is unavailable
+                sys.exit(1)
         except Exception as e:
             logger.critical(
                 f"Order Service: An unexpected error occurred during database startup: {e}",
@@ -473,7 +471,8 @@ def list_orders(
     db: Session = Depends(get_db),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
-    user_id: Optional[int] = Query(None, ge=1, description="Filter orders by user ID."),
+    user_id: Optional[int] = Query(
+        None, ge=1, description="Filter orders by user ID."),
     status: Optional[str] = Query(
         None,
         pattern="^(pending|processing|shipped|cancelled|confirmed|completed|failed)$",
@@ -576,7 +575,8 @@ async def update_order_status(
     summary="Delete an order by ID",
 )
 def delete_order(order_id: int, db: Session = Depends(get_db)):
-    logger.info(f"Order Service: Attempting to delete order with ID: {order_id}")
+    logger.info(
+        f"Order Service: Attempting to delete order with ID: {order_id}")
     order = db.query(Order).filter(Order.order_id == order_id).first()
     if not order:
         logger.warning(
@@ -590,7 +590,8 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
         # SQLAlchemy cascade="all, delete-orphan" on relationship handles deleting order_items
         db.delete(order)
         db.commit()
-        logger.info(f"Order Service: Order (ID: {order_id}) deleted successfully.")
+        logger.info(
+            f"Order Service: Order (ID: {order_id}) deleted successfully.")
     except Exception as e:
         db.rollback()
         logger.error(
