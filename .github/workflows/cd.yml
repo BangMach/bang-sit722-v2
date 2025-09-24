@@ -6,9 +6,9 @@ on:
       - CI Pipeline
     types:
       - completed
-    branches: 
+    branches:
       - testing
-      
+
   workflow_dispatch:
     inputs:
       STAGING_RESOURCE_GROUP:
@@ -18,7 +18,7 @@ on:
         description: "AKS cluster name for staging"
         required: true
 jobs:
-  # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
+  # Job 1: Deploy to Staging Environment (runs only if image build and push succeesd)
   deploy_staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
@@ -55,7 +55,6 @@ jobs:
           kubectl apply -f product-db.yaml
           kubectl apply -f order-db.yaml
           kubectl apply -f customer-db.yaml
-
 
       - name: Deploy Backend Microservices (Product, Order, Customer ) to Stagging
         run: |
@@ -116,8 +115,6 @@ jobs:
           export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
           envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
 
-
-          
       - name: Deploy Frontend to AKS
         run: |
           echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
