@@ -6,13 +6,13 @@ This plan outlines the implementation of a two-stage DevOps pipeline (Staging an
 ## Implementation Phases
 
 ### Phase 1: Repository Setup and CI Pipeline (Stage 1)
-- Create a new GitHub repository (already done by user).
+- Create a new GitHub repository.
 - Push the downloaded code to the remote repository.
 - Create a GitHub Actions workflow for CI: Triggered on push to 'testing' branch.
 - Workflow steps: Lint code, run unit tests for all services (product_service, order_service, customer_service), build Docker images, push to Azure Container Registry (ACR) if tests pass.
 
 ### Phase 2: Staging Deployment (Stage 2)
-- Add a second job in the workflow: After image push to ACR, use Azure CLI or Bicep to create temporary staging AKS resources (e.g., namespace, deployments).
+- Add a second job in the workflow: After image push to ACR, use Azure CLI to create temporary staging AKS resources (e.g., namespace, deployments).
 - Deploy images to staging AKS.
 - Perform manual or trivial acceptance tests (e.g., health checks via API calls).
 - Destroy staging resources after testing.
@@ -54,8 +54,6 @@ This plan outlines the implementation of a two-stage DevOps pipeline (Staging an
 ## Testing Steps
 
 ### Unit Testing
-- Run pytest for backend services: Test CRUD operations, RabbitMQ events, database interactions.
-- Mock external dependencies (e.g., Azure Blob Storage, RabbitMQ).
 
 ### Integration Testing
 - In pipeline: Test API endpoints (e.g., product creation, order placement) against local Docker containers.
