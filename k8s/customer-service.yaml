@@ -1,4 +1,3 @@
-# week05/k8s/customer-service.yaml
 
 apiVersion: apps/v1
 kind: Deployment
@@ -18,7 +17,7 @@ spec:
     spec:
       containers:
       - name: customer-service-container
-        image: durgeshsamariya.azurecr.io/week05ex01cu:v1
+        image: ${ACR}/customer_service:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8002

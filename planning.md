@@ -13,6 +13,7 @@ This plan outlines the implementation of a two-stage DevOps pipeline (Staging an
 
 ### Phase 2: Staging Deployment (Stage 2)
 - Add a second job in the workflow: After image push to ACR, use Azure CLI to create temporary staging AKS resources (e.g., namespace, deployments).
+- Have to get the image name from the ACR and deploying to AKS
 - Deploy images to staging AKS.
 - Perform manual or trivial acceptance tests (e.g., health checks via API calls).
 - Destroy staging resources after testing.
