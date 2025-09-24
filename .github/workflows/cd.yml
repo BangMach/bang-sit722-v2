@@ -1,20 +1,13 @@
 name: Multi-Stage Deployment
 
 on:
+  workflow_run:
+    workflows:
+      - CI Pipeline
+    types:
+      - completed
+
   workflow_dispatch:
-    inputs:
-      STAGING_RESOURCE_GROUP:
-        description: "Resource group for staging environment"
-        required: true
-      STAGING_AKS_CLUSTER:
-        description: "AKS cluster name for staging"
-        required: true
-      PRODUCTION_RESOURCE_GROUP:
-        description: "Resource group for production environment"
-        required: true
-      PRODUCTION_AKS_CLUSTER:
-        description: "AKS cluster name for production"
-        required: true
 
 jobs:
   azure_login:
