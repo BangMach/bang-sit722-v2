@@ -1,9 +1,9 @@
 name: CI Pipeline
 
 on:
-  # push:
-  #   branches:
-  #     - testing
+  push:
+    branches:
+      - testing
   workflow_dispatch:
 
 # Define global environment variables that can be used across jobs
