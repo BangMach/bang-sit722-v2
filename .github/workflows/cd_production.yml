@@ -16,11 +16,11 @@ jobs:
     name: Deploy to Production
     runs-on: ubuntu-latest
     if: >
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.pull_request.merged == true) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        (github.event.workflow_run.conclusion == 'success' &&
+        github.event.pull_request.merged == true) ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
-      # Step 1: Checkout the repositories
+      # Step 1: Checkout the repository
       - name: Checkout Code
         uses: actions/checkout@v4
 
