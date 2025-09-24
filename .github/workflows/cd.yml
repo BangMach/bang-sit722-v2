@@ -16,10 +16,15 @@ on:
         required: true
 jobs:
   # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
-  deploy_staging:
+  deploy_to_staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Ensure the entire repository is fetched
+
       - name: Azure Login
         uses: azure/login@v1
         with:
@@ -57,82 +62,82 @@ jobs:
           kubectl apply -f customer-service-substituted.yaml
 
       - name: Wait for Backend LoadBalancer IPs
-        run: |
-          echo "Waiting for LoadBalancer IPs..."
-          for i in {1..10}; do  # Retry up to 10 times
-            PRODUCT_IP=$(kubectl get svc product-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-            ORDER_IP=$(kubectl get svc order-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
             if [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ]; then
               echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
               echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
-              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP"
-              break
-            fi
+              echo "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP"status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+              breakP=$(kubectl get svc order-service-w08e1 -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            fi [ -n "$PRODUCT_IP" ] && [ -n "$ORDER_IP" ]; then
             echo "Attempt $i: IPs not ready yet. Retrying in 30s..."
-            sleep 30
-          done
+            sleep 30ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
+          doneecho "IPs retrieved: PRODUCT_IP=$PRODUCT_IP, ORDER_IP=$ORDER_IP"
           if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ]; then
             echo "Error: Failed to retrieve LoadBalancer IPs after retries"
-            exit 1
-          fi
-
-      - name: Capture Product Service IP for Workflow Output
-        id: get_product_ip
-        run: |
+            exit 1Attempt $i: IPs not ready yet. Retrying in 30s..."
+          fisleep 30
+          done
+      - name: Capture Product Service IP for Workflow Outputn
+        id: get_product_ipailed to retrieve LoadBalancer IPs after retries"
+        run: |it 1
           echo "external_ip=http://${{ env.PRODUCT_IP }}:8000" >> $GITHUB_OUTPUT
           echo "Captured PRODUCT_API_IP: http://${{ env.PRODUCT_IP }}:8000"
-
+      - name: Capture Product Service IP for Workflow Output
       - name: Capture Order Service IP for Workflow Output
         id: get_order_ip
-        run: |
+        run: | "external_ip=http://${{ env.PRODUCT_IP }}:8000" >> $GITHUB_OUTPUT
           echo "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
           echo "Captured ORDER_API_IP: http://${{ env.ORDER_IP }}:8001"
-
+      - name: Capture Order Service IP for Workflow Output
       # Build and Push Docker image for Frontend
       - name: Build and Push Frontend Image
-        run: |
+        run: | "external_ip=http://${{ env.ORDER_IP }}:8001" >> $GITHUB_OUTPUT
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
           docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
-
-      - name: Substitute ACR in YAML
+      # Build and Push Docker image for Frontend
+      - name: Substitute ACR in YAMLd Image
         run: |
-          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
-          envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
+          export ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}RY }}/frontend:latest ./frontend/
+          envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml:latest
       - name: Deploy Frontend to AKS
-        run: |
+        run: |Substitute ACR in YAML
           echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
-          cd k8s/
-          # Ensure frontend-service.yaml is configured with your ACR
+          cd k8s/ACR=${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          # Ensure frontend-service.yaml is configured with your ACRml
           kubectl apply -f frontend-substituted.yaml
-
-      - name: Wait for Manual Testing
+        run: |
+      - name: Wait for Manual Testingth latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
         run: echo "Pausing for 5 minutes..."; sleep 300
-
-      - name: Destroy Staging Environment
+          # Ensure frontend-service.yaml is configured with your ACR
+      - name: Destroy Staging Environmentituted.yaml
         run: |
           kubectl delete -f task10_2d/k8s/order-service.yaml
           kubectl delete -f task10_2d/k8s/product-service.yaml
           kubectl delete -f task10_2d/k8s/customer-service.yaml
-
+      - name: Destroy Staging Environment
   deploy_production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: deploy_staging
+    name: Deploy to Productionsk10_2d/k8s/order-service.yaml
+    runs-on: ubuntu-latestf task10_2d/k8s/product-service.yaml
+    needs: deploy_staging-f task10_2d/k8s/customer-service.yaml
     if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout Code
+    steps:roduction:
+      - name: Checkout Codeion
         uses: actions/checkout@v4
-
+    needs: deploy_staging
       - name: Set Kubernetes Context for Production
         run: |
           az aks get-credentials --resource-group ${{ inputs.PRODUCTION_RESOURCE_GROUP }} --name ${{ inputs.PRODUCTION_AKS_CLUSTER }} --overwrite-existing
-
+        uses: actions/checkout@v4
       - name: Deploy to Production
-        run: |
+        run: |Set Kubernetes Context for Production
           kubectl apply -f week05/k8s/order-service.yaml
-          kubectl apply -f week05/k8s/product-service.yaml
+          kubectl apply -f week05/k8s/product-service.yamlts.PRODUCTION_RESOURCE_GROUP }} --name ${{ inputs.PRODUCTION_AKS_CLUSTER }} --overwrite-existing
           kubectl apply -f week05/k8s/customer-service.yaml
-
+      - name: Deploy to Production
+      - name: Monitor Deployment
+        run: |ctl apply -f week05/k8s/order-service.yaml
+          kubectl get pods --namespace defaultservice.yaml
+          kubectl get services --namespace defaultvice.yaml
+          kubectl get services --namespace default
       - name: Monitor Deployment
         run: |
           kubectl get pods --namespace default
