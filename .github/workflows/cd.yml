@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Job 1: Deploy to Staging Environment (runs only if image build and push succeesd)
+  # Job 1: Deploy to Staging Environment (runs only if image build and push succeed)
   deploy_staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
