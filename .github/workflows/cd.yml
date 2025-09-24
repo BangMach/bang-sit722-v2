@@ -104,6 +104,10 @@ jobs:
           echo "external_ip=http://${{ env.CUSTOMER_IP }}:8002" >> $GITHUB_OUTPUT
           echo "Captured CUSTOMER_API_IP: http://${{ env.CUSTOMER_IP }}:8002"
         ################################################################################
+        # Login to Azure Container Registry (ACR)
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
       - name: Build and Push Frontend Image
         run: |
           docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
@@ -116,7 +120,7 @@ jobs:
 
       - name: Deploy Frontend to AKS
         run: |
-          echo "Deploying frontend with latest tag to AKS cluster: ${{ inputs.aks_cluster_name }}"
+          echo "Deploying frontend with latest tag to AKS cluster:${{ secrets.STAGING_AKS_CLUSTER }}"
           cd k8s/
           # Ensure frontend-service.yaml is configured with your ACR
           kubectl apply -f frontend-substituted.yaml
