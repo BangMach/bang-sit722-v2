@@ -152,12 +152,7 @@ jobs:
         run: |
           docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/customer_service:latest ./backend/customer_service/
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/customer_service:latest
-      # Build and Push Docker image for Frontend
-      - name: Build and Push Frontend Images
-        working-directory: frontend
-        run: |
-          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest .
-          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:latest
+
       # Logout from Azure for security (runs even if image push fails)
       - name: Logout from Azure
         run: az logout
