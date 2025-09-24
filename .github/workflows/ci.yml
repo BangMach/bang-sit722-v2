@@ -6,7 +6,6 @@ on:
   #     - testing
   workflow_dispatch:
 
-
 # Define global environment variables that can be used across jobs
 env:
   # ACR Login Server (e.g., myregistry.azurecr.io)
@@ -157,6 +156,11 @@ jobs:
           docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service/
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/order_service:latest
 
+      # Build and Push Docker image for Customer Service
+      - name: Build and Push Customer Service Image
+        run: |
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/customer_service:latest ./backend/customer_service/
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/customer_service:latest
       # Build and Push Docker image for Frontend
       - name: Build and Push Frontend Images
         working-directory: frontend
