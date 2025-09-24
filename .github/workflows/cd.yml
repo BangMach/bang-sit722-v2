@@ -10,13 +10,7 @@ on:
       - testing
 
   workflow_dispatch:
-    inputs:
-      STAGING_RESOURCE_GROUP:
-        description: "Resource group for staging environment"
-        required: true
-      STAGING_AKS_CLUSTER:
-        description: "AKS cluster name for staging"
-        required: true
+
 jobs:
   # Job 1: Deploy to Staging Environment (runs only if image build and push succeesd)
   deploy_staging:
