@@ -1,0 +1,196 @@
+name: Jenkins Integration Pipeline
+
+on:
+  push:
+    branches:
+      - testing
+      - main
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      pipeline_type:
+        description: 'Type of pipeline to trigger'
+        required: true
+        type: choice
+        options:
+          - ci
+          - cd-staging
+          - cd-production
+        default: 'ci'
+      image_tag:
+        description: 'Docker image tag (for production deployment)'
+        required: false
+        type: string
+        default: 'latest'
+      rollback:
+        description: 'Perform rollback (production only)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  trigger-jenkins-ci:
+    name: Trigger Jenkins CI Pipeline
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/testing' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trigger Jenkins CI Build
+        run: |
+          echo "Triggering Jenkins CI pipeline for testing branch..."
+          
+          # Trigger Jenkins job using webhook or API
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.JENKINS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "parameter": [
+                {"name": "BRANCH_NAME", "value": "'${{ github.ref_name }}'"},
+                {"name": "COMMIT_SHA", "value": "'${{ github.sha }}'"},
+                {"name": "GITHUB_RUN_ID", "value": "'${{ github.run_id }}'"}
+              ]
+            }' \
+            "${{ secrets.JENKINS_URL }}/job/bang-sit722-ci/buildWithParameters" || {
+              echo "Failed to trigger Jenkins CI pipeline"
+              echo "Please ensure Jenkins is configured with:"
+              echo "1. JENKINS_URL secret pointing to your Jenkins instance"
+              echo "2. JENKINS_API_TOKEN secret with valid API token"
+              echo "3. bang-sit722-ci job configured in Jenkins"
+              exit 1
+            }
+          
+          echo "Jenkins CI pipeline triggered successfully!"
+          echo "Monitor the build at: ${{ secrets.JENKINS_URL }}/job/bang-sit722-ci/"
+
+  trigger-jenkins-cd-staging:
+    name: Trigger Jenkins CD Staging Pipeline
+    runs-on: ubuntu-latest
+    if: |
+      (github.ref == 'refs/heads/testing' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.pipeline_type == 'cd-staging')
+    needs: [trigger-jenkins-ci]
+    # Only run if CI job exists and we're not in manual mode
+    # In manual mode, we skip the needs requirement
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Wait for CI Pipeline (if auto-triggered)
+        if: github.event_name == 'push'
+        run: |
+          echo "Waiting for CI pipeline to complete..."
+          # Add logic to wait for CI completion if needed
+          sleep 60
+
+      - name: Trigger Jenkins CD Staging Build
+        run: |
+          echo "Triggering Jenkins CD Staging pipeline..."
+          
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.JENKINS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "parameter": [
+                {"name": "DEPLOY_ACTION", "value": "deploy"},
+                {"name": "BRANCH_NAME", "value": "'${{ github.ref_name }}'"},
+                {"name": "COMMIT_SHA", "value": "'${{ github.sha }}'"},
+                {"name": "GITHUB_RUN_ID", "value": "'${{ github.run_id }}'"}
+              ]
+            }' \
+            "${{ secrets.JENKINS_URL }}/job/bang-sit722-cd-staging/buildWithParameters" || {
+              echo "Failed to trigger Jenkins CD Staging pipeline"
+              exit 1
+            }
+          
+          echo "Jenkins CD Staging pipeline triggered successfully!"
+          echo "Monitor the build at: ${{ secrets.JENKINS_URL }}/job/bang-sit722-cd-staging/"
+
+  trigger-jenkins-cd-production:
+    name: Trigger Jenkins CD Production Pipeline
+    runs-on: ubuntu-latest
+    if: |
+      (github.event.pull_request.merged == true && github.base_ref == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.pipeline_type == 'cd-production')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set deployment parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "image_tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+            echo "rollback=${{ github.event.inputs.rollback }}" >> $GITHUB_OUTPUT
+          else
+            echo "image_tag=latest" >> $GITHUB_OUTPUT
+            echo "rollback=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Jenkins CD Production Build
+        run: |
+          echo "Triggering Jenkins CD Production pipeline..."
+          echo "Image Tag: ${{ steps.params.outputs.image_tag }}"
+          echo "Rollback: ${{ steps.params.outputs.rollback }}"
+          
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.JENKINS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "parameter": [
+                {"name": "IMAGE_TAG", "value": "'${{ steps.params.outputs.image_tag }}'"},
+                {"name": "ROLLBACK", "value": '${{ steps.params.outputs.rollback }}'},
+                {"name": "DEPLOYMENT_STRATEGY", "value": "rolling"},
+                {"name": "BRANCH_NAME", "value": "'${{ github.ref_name }}'"},
+                {"name": "COMMIT_SHA", "value": "'${{ github.sha }}'"},
+                {"name": "GITHUB_RUN_ID", "value": "'${{ github.run_id }}'"}
+              ]
+            }' \
+            "${{ secrets.JENKINS_URL }}/job/bang-sit722-cd-production/buildWithParameters" || {
+              echo "Failed to trigger Jenkins CD Production pipeline"
+              exit 1
+            }
+          
+          echo "Jenkins CD Production pipeline triggered successfully!"
+          echo "Monitor the build at: ${{ secrets.JENKINS_URL }}/job/bang-sit722-cd-production/"
+
+  manual-trigger:
+    name: Manual Pipeline Trigger
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Display Manual Trigger Info
+        run: |
+          echo "Manual pipeline trigger requested:"
+          echo "Pipeline Type: ${{ github.event.inputs.pipeline_type }}"
+          echo "Image Tag: ${{ github.event.inputs.image_tag }}"
+          echo "Rollback: ${{ github.event.inputs.rollback }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          
+          echo "The corresponding Jenkins job will be triggered by the specific job above."
+
+  notify-completion:
+    name: Send Completion Notification
+    runs-on: ubuntu-latest
+    needs: [trigger-jenkins-ci, trigger-jenkins-cd-staging, trigger-jenkins-cd-production]
+    if: always()
+
+    steps:
+      - name: Send notification
+        run: |
+          echo "GitHub Actions Jenkins integration workflow completed."
+          echo "Check Jenkins for the actual pipeline execution status."
+          echo "Jenkins URL: ${{ secrets.JENKINS_URL }}"
+          
+          # You can add additional notification logic here
+          # such as Slack, Teams, or email notifications

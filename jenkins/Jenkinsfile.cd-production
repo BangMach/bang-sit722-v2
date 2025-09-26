@@ -1,0 +1,632 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Azure credentials
+        AZURE_CREDENTIALS = credentials('azure-service-principal')
+        // ACR configuration
+        ACR_LOGIN_SERVER = credentials('acr-login-server')
+        AZURE_CONTAINER_REGISTRY = credentials('azure-container-registry')
+        // Production environment
+        PRODUCTION_RESOURCE_GROUP = credentials('production-resource-group')
+        PRODUCTION_AKS_CLUSTER = credentials('production-aks-cluster')
+        
+        // Build information
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        IMAGE_TAG = "latest"  // Default to latest, can be overridden
+    }
+    
+    parameters {
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Docker image tag to deploy to production'
+        )
+        booleanParam(
+            name: 'ROLLBACK',
+            defaultValue: false,
+            description: 'Perform a rollback to the previous version'
+        )
+        choice(
+            name: 'DEPLOYMENT_STRATEGY',
+            choices: ['rolling', 'blue-green'],
+            description: 'Deployment strategy to use'
+        )
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out repository...'
+                checkout scm
+            }
+        }
+        
+        stage('Pre-deployment Validation') {
+            steps {
+                script {
+                    // Validate that we're deploying from main branch for production
+                    if (env.BRANCH_NAME != 'main') {
+                        error("Production deployments are only allowed from the main branch. Current branch: ${env.BRANCH_NAME}")
+                    }
+                    
+                    // Set image tag from parameter
+                    env.IMAGE_TAG = params.IMAGE_TAG
+                    
+                    echo "Deploying to production with the following configuration:"
+                    echo "Image Tag: ${env.IMAGE_TAG}"
+                    echo "Deployment Strategy: ${params.DEPLOYMENT_STRATEGY}"
+                    echo "Rollback: ${params.ROLLBACK}"
+                }
+            }
+        }
+        
+        stage('Setup Production Infrastructure') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                dir('infrastructure') {
+                    script {
+                        withCredentials([azureServicePrincipal('azure-service-principal')]) {
+                            sh '''
+                                echo "Setting up production infrastructure..."
+                                export ARM_CLIENT_ID="${AZURE_CLIENT_ID}"
+                                export ARM_CLIENT_SECRET="${AZURE_CLIENT_SECRET}"
+                                export ARM_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID}"
+                                export ARM_TENANT_ID="${AZURE_TENANT_ID}"
+                                
+                                terraform init
+                                terraform plan -var-file="production.tfvars" -out=tfplan-prod
+                                terraform apply -auto-approve tfplan-prod
+                                
+                                # Export infrastructure outputs
+                                echo "RESOURCE_GROUP_NAME=$(terraform output -raw resource_group_name)" >> ../build.env
+                                echo "ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)" >> ../build.env
+                                echo "AKS_CLUSTER_NAME=$(terraform output -raw aks_cluster_name)" >> ../build.env
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Azure Login and Setup') {
+            steps {
+                script {
+                    withCredentials([azureServicePrincipal('azure-service-principal')]) {
+                        sh '''
+                            echo "Logging into Azure..."
+                            az login --service-principal \
+                                --username "${AZURE_CLIENT_ID}" \
+                                --password "${AZURE_CLIENT_SECRET}" \
+                                --tenant "${AZURE_TENANT_ID}"
+                            
+                            echo "Setting up kubectl context for production..."
+                            source build.env || true
+                            az aks get-credentials \
+                                --resource-group "${RESOURCE_GROUP_NAME:-${PRODUCTION_RESOURCE_GROUP}}" \
+                                --name "${AKS_CLUSTER_NAME:-${PRODUCTION_AKS_CLUSTER}}" \
+                                --overwrite-existing
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Pre-deployment Health Check') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Checking current production health..."
+                        
+                        # Check if production services are already deployed
+                        if kubectl get deployment product-service 2>/dev/null; then
+                            echo "Existing production deployment found. Checking health..."
+                            
+                            # Get current service IPs
+                            PRODUCT_IP=$(kubectl get svc product-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+                            ORDER_IP=$(kubectl get svc order-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+                            CUSTOMER_IP=$(kubectl get svc customer-service-w05-aks -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+                            
+                            # Health check existing services
+                            if [ ! -z "$PRODUCT_IP" ]; then
+                                curl -f "http://$PRODUCT_IP:8000/health" || echo "Product service health check failed"
+                            fi
+                            if [ ! -z "$ORDER_IP" ]; then
+                                curl -f "http://$ORDER_IP:8001/health" || echo "Order service health check failed"
+                            fi
+                            if [ ! -z "$CUSTOMER_IP" ]; then
+                                curl -f "http://$CUSTOMER_IP:8002/health" || echo "Customer service health check failed"
+                            fi
+                        else
+                            echo "No existing production deployment found. This is the initial deployment."
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Backup Current State') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Backing up current production state..."
+                        
+                        # Create backup directory with timestamp
+                        BACKUP_DIR="backup/$(date +%Y%m%d_%H%M%S)"
+                        mkdir -p "$BACKUP_DIR"
+                        
+                        # Backup current deployments if they exist
+                        if kubectl get deployment product-service 2>/dev/null; then
+                            kubectl get deployment product-service -o yaml > "$BACKUP_DIR/product-service-deployment.yaml"
+                            kubectl get deployment order-service -o yaml > "$BACKUP_DIR/order-service-deployment.yaml"  
+                            kubectl get deployment customer-service -o yaml > "$BACKUP_DIR/customer-service-deployment.yaml"
+                            kubectl get deployment frontend -o yaml > "$BACKUP_DIR/frontend-deployment.yaml" || true
+                            
+                            # Save current image tags for rollback
+                            kubectl get deployment product-service -o jsonpath='{.spec.template.spec.containers[0].image}' > "$BACKUP_DIR/product-service-image.txt"
+                            kubectl get deployment order-service -o jsonpath='{.spec.template.spec.containers[0].image}' > "$BACKUP_DIR/order-service-image.txt"
+                            kubectl get deployment customer-service -o jsonpath='{.spec.template.spec.containers[0].image}' > "$BACKUP_DIR/customer-service-image.txt"
+                            kubectl get deployment frontend -o jsonpath='{.spec.template.spec.containers[0].image}' > "$BACKUP_DIR/frontend-image.txt" || true
+                            
+                            echo "Backup created in $BACKUP_DIR"
+                            echo "BACKUP_DIR=$BACKUP_DIR" >> build.env
+                        else
+                            echo "No existing deployments to backup"
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Infrastructure') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Deploying production infrastructure..."
+                        
+                        # Source environment variables
+                        source build.env || true
+                        
+                        # Deploy persistent components first
+                        echo "Deploying ConfigMaps and Secrets..."
+                        kubectl apply -f k8s/configmaps.yaml
+                        kubectl apply -f k8s/secrets.yaml
+                        
+                        echo "Deploying databases..."
+                        kubectl apply -f k8s/product-db.yaml
+                        kubectl apply -f k8s/order-db.yaml
+                        kubectl apply -f k8s/customer-db.yaml
+                        kubectl apply -f k8s/rabbitmq.yaml
+                        
+                        echo "Waiting for databases to be ready..."
+                        kubectl wait --for=condition=ready pod -l app=product-db --timeout=600s
+                        kubectl wait --for=condition=ready pod -l app=order-db --timeout=600s
+                        kubectl wait --for=condition=ready pod -l app=customer-db --timeout=600s
+                        kubectl wait --for=condition=ready pod -l app=rabbitmq --timeout=600s
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Microservices') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    if (params.DEPLOYMENT_STRATEGY == 'rolling') {
+                        sh '''
+                            echo "Performing rolling deployment of microservices..."
+                            
+                            # Source environment variables
+                            source build.env || true
+                            
+                            # Set ACR server for substitution
+                            export ACR="${ACR_LOGIN_SERVER:-${AZURE_CONTAINER_REGISTRY}}"
+                            
+                            # Substitute ACR in YAML files
+                            envsubst < k8s/product-service.yaml > k8s/product-service-prod.yaml
+                            envsubst < k8s/order-service.yaml > k8s/order-service-prod.yaml
+                            envsubst < k8s/customer-service.yaml > k8s/customer-service-prod.yaml
+                            
+                            # Update image tags
+                            if [ "${IMAGE_TAG}" != "latest" ]; then
+                                sed -i "s/:latest/:${IMAGE_TAG}/g" k8s/*-prod.yaml
+                            fi
+                            
+                            # Deploy services one by one with health checks
+                            echo "Deploying product service..."
+                            kubectl apply -f k8s/product-service-prod.yaml
+                            kubectl rollout status deployment/product-service --timeout=600s
+                            
+                            echo "Deploying order service..."
+                            kubectl apply -f k8s/order-service-prod.yaml
+                            kubectl rollout status deployment/order-service --timeout=600s
+                            
+                            echo "Deploying customer service..."
+                            kubectl apply -f k8s/customer-service-prod.yaml
+                            kubectl rollout status deployment/customer-service --timeout=600s
+                        '''
+                    } else {
+                        echo "Blue-Green deployment strategy selected (simplified for demo)"
+                        sh '''
+                            echo "Performing blue-green deployment of microservices..."
+                            # For simplicity, using rolling deployment
+                            # In a real scenario, you would implement proper blue-green deployment
+                            
+                            # Source environment variables
+                            source build.env || true
+                            
+                            # Set ACR server for substitution
+                            export ACR="${ACR_LOGIN_SERVER:-${AZURE_CONTAINER_REGISTRY}}"
+                            
+                            # Substitute ACR in YAML files
+                            envsubst < k8s/product-service.yaml > k8s/product-service-prod.yaml
+                            envsubst < k8s/order-service.yaml > k8s/order-service-prod.yaml
+                            envsubst < k8s/customer-service.yaml > k8s/customer-service-prod.yaml
+                            
+                            # Update image tags
+                            if [ "${IMAGE_TAG}" != "latest" ]; then
+                                sed -i "s/:latest/:${IMAGE_TAG}/g" k8s/*-prod.yaml
+                            fi
+                            
+                            # Deploy all services
+                            kubectl apply -f k8s/product-service-prod.yaml
+                            kubectl apply -f k8s/order-service-prod.yaml
+                            kubectl apply -f k8s/customer-service-prod.yaml
+                            
+                            # Wait for rollout to complete
+                            kubectl rollout status deployment/product-service --timeout=600s
+                            kubectl rollout status deployment/order-service --timeout=600s
+                            kubectl rollout status deployment/customer-service --timeout=600s
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Get Production Service IPs') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Getting production service IPs..."
+                        
+                        # Function to get external IP with retry
+                        get_external_ip() {
+                            local service_name=$1
+                            local max_attempts=30
+                            local attempt=1
+                            
+                            while [ $attempt -le $max_attempts ]; do
+                                IP=$(kubectl get svc $service_name -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+                                if [ ! -z "$IP" ] && [ "$IP" != "null" ]; then
+                                    echo $IP
+                                    return 0
+                                fi
+                                echo "Attempt $attempt: Waiting for $service_name IP..."
+                                sleep 10
+                                attempt=$((attempt + 1))
+                            done
+                            echo "Failed to get IP for $service_name"
+                            return 1
+                        }
+                        
+                        # Get IPs for all services
+                        PRODUCT_IP=$(get_external_ip "product-service-w05-aks")
+                        ORDER_IP=$(get_external_ip "order-service-w05-aks")
+                        CUSTOMER_IP=$(get_external_ip "customer-service-w05-aks")
+                        
+                        # Validate IPs
+                        if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ] || [ -z "$CUSTOMER_IP" ]; then
+                            echo "Error: Failed to retrieve all LoadBalancer IPs"
+                            kubectl get services
+                            exit 1
+                        fi
+                        
+                        echo "Production Service IPs:"
+                        echo "PRODUCT_IP=$PRODUCT_IP"
+                        echo "ORDER_IP=$ORDER_IP"
+                        echo "CUSTOMER_IP=$CUSTOMER_IP"
+                        
+                        # Save IPs for frontend deployment
+                        echo "PRODUCT_IP=$PRODUCT_IP" >> service_ips.env
+                        echo "ORDER_IP=$ORDER_IP" >> service_ips.env
+                        echo "CUSTOMER_IP=$CUSTOMER_IP" >> service_ips.env
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Frontend') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Deploying production frontend..."
+                        
+                        # Source the service IPs
+                        source service_ips.env
+                        
+                        # Update frontend configuration with backend URLs
+                        cp frontend/main.js frontend/main.js.bak
+                        sed -i "s|_PRODUCT_API_URL_|http://$PRODUCT_IP:8000|g" frontend/main.js
+                        sed -i "s|_ORDER_API_URL_|http://$ORDER_IP:8001|g" frontend/main.js
+                        sed -i "s|_CUSTOMER_API_URL_|http://$CUSTOMER_IP:8002|g" frontend/main.js
+                        
+                        # Validate replacement
+                        if grep -q "_.*_API_URL_" frontend/main.js; then
+                            echo "Error: Some placeholders were not replaced"
+                            cat frontend/main.js | grep "_.*_API_URL_"
+                            exit 1
+                        fi
+                        
+                        echo "Building and pushing production frontend image..."
+                        az acr login --name ${AZURE_CONTAINER_REGISTRY}
+                        
+                        docker build -t ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} ./frontend/
+                        docker push ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG}
+                        
+                        # Substitute ACR in frontend YAML
+                        export ACR="${ACR_LOGIN_SERVER}"
+                        envsubst < k8s/frontend.yaml > k8s/frontend-prod.yaml
+                        
+                        # Update image tag if specified
+                        if [ "${IMAGE_TAG}" != "latest" ]; then
+                            sed -i "s/:latest/:${IMAGE_TAG}/g" k8s/frontend-prod.yaml
+                        fi
+                        
+                        # Deploy frontend
+                        kubectl apply -f k8s/frontend-prod.yaml
+                        kubectl rollout status deployment/frontend --timeout=600s
+                        
+                        # Get frontend URL
+                        FRONTEND_IP=$(kubectl get svc frontend-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                        if [ ! -z "$FRONTEND_IP" ]; then
+                            echo "Production frontend deployed successfully!"
+                            echo "Frontend URL: http://$FRONTEND_IP"
+                            echo "FRONTEND_URL=http://$FRONTEND_IP" >> deployment_info.env
+                        fi
+                        
+                        # Restore original main.js
+                        mv frontend/main.js.bak frontend/main.js
+                    '''
+                }
+            }
+        }
+        
+        stage('Production Health Checks') {
+            when {
+                not { params.ROLLBACK }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Performing production health checks..."
+                        
+                        source service_ips.env
+                        
+                        # Function to check service health with retries
+                        check_service_health() {
+                            local service_name=$1
+                            local service_ip=$2
+                            local service_port=$3
+                            local max_attempts=20
+                            local attempt=1
+                            
+                            while [ $attempt -le $max_attempts ]; do
+                                echo "Health check attempt $attempt for $service_name..."
+                                if curl -f -s "http://$service_ip:$service_port/health" > /dev/null; then
+                                    echo "$service_name is healthy!"
+                                    return 0
+                                fi
+                                sleep 15
+                                attempt=$((attempt + 1))
+                            done
+                            echo "$service_name health check failed after $max_attempts attempts!"
+                            return 1
+                        }
+                        
+                        # Check health of all services
+                        HEALTH_CHECK_FAILED=false
+                        
+                        check_service_health "product-service" "$PRODUCT_IP" "8000" || HEALTH_CHECK_FAILED=true
+                        check_service_health "order-service" "$ORDER_IP" "8001" || HEALTH_CHECK_FAILED=true
+                        check_service_health "customer-service" "$CUSTOMER_IP" "8002" || HEALTH_CHECK_FAILED=true
+                        
+                        if [ "$HEALTH_CHECK_FAILED" = true ]; then
+                            echo "Production health checks failed! Triggering rollback..."
+                            exit 1
+                        fi
+                        
+                        echo "All production services are healthy!"
+                    '''
+                }
+            }
+        }
+        
+        stage('Rollback') {
+            when {
+                anyOf {
+                    expression { params.ROLLBACK }
+                    expression { currentBuild.result == 'FAILURE' }
+                }
+            }
+            steps {
+                script {
+                    if (params.ROLLBACK) {
+                        echo "Manual rollback requested"
+                    } else {
+                        echo "Rollback triggered due to deployment failure"
+                    }
+                    
+                    sh '''
+                        echo "Performing rollback to previous version..."
+                        
+                        # Check if backup exists
+                        LATEST_BACKUP=$(ls -1t backup/ | head -n1 2>/dev/null || echo "")
+                        
+                        if [ ! -z "$LATEST_BACKUP" ] && [ -d "backup/$LATEST_BACKUP" ]; then
+                            echo "Found backup: $LATEST_BACKUP"
+                            
+                            # Rollback deployments
+                            if [ -f "backup/$LATEST_BACKUP/product-service-image.txt" ]; then
+                                PREV_IMAGE=$(cat "backup/$LATEST_BACKUP/product-service-image.txt")
+                                kubectl set image deployment/product-service product-service="$PREV_IMAGE"
+                                kubectl rollout status deployment/product-service --timeout=300s
+                            fi
+                            
+                            if [ -f "backup/$LATEST_BACKUP/order-service-image.txt" ]; then
+                                PREV_IMAGE=$(cat "backup/$LATEST_BACKUP/order-service-image.txt")
+                                kubectl set image deployment/order-service order-service="$PREV_IMAGE"
+                                kubectl rollout status deployment/order-service --timeout=300s
+                            fi
+                            
+                            if [ -f "backup/$LATEST_BACKUP/customer-service-image.txt" ]; then
+                                PREV_IMAGE=$(cat "backup/$LATEST_BACKUP/customer-service-image.txt")
+                                kubectl set image deployment/customer-service customer-service="$PREV_IMAGE"
+                                kubectl rollout status deployment/customer-service --timeout=300s
+                            fi
+                            
+                            if [ -f "backup/$LATEST_BACKUP/frontend-image.txt" ]; then
+                                PREV_IMAGE=$(cat "backup/$LATEST_BACKUP/frontend-image.txt")
+                                kubectl set image deployment/frontend frontend="$PREV_IMAGE" || true
+                                kubectl rollout status deployment/frontend --timeout=300s || true
+                            fi
+                            
+                            echo "Rollback completed successfully!"
+                        else
+                            echo "No backup found for rollback. Using Kubernetes rollback..."
+                            kubectl rollout undo deployment/product-service || true
+                            kubectl rollout undo deployment/order-service || true
+                            kubectl rollout undo deployment/customer-service || true
+                            kubectl rollout undo deployment/frontend || true
+                            
+                            echo "Kubernetes rollback completed!"
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Post-deployment Monitoring') {
+            when {
+                allOf {
+                    not { params.ROLLBACK }
+                    expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Setting up post-deployment monitoring..."
+                        
+                        source service_ips.env
+                        source deployment_info.env || true
+                        
+                        echo "=========================================="
+                        echo "PRODUCTION DEPLOYMENT COMPLETED"
+                        echo "=========================================="
+                        echo "Deployment Date: $(date)"
+                        echo "Image Tag: ${IMAGE_TAG}"
+                        echo "Build Number: ${BUILD_NUMBER}"
+                        echo ""
+                        echo "Production Service URLs:"
+                        echo "Product Service: http://$PRODUCT_IP:8000"
+                        echo "Order Service: http://$ORDER_IP:8001"
+                        echo "Customer Service: http://$CUSTOMER_IP:8002"
+                        if [ ! -z "$FRONTEND_URL" ]; then
+                            echo "Frontend: $FRONTEND_URL"
+                        fi
+                        echo ""
+                        echo "Health Check URLs:"
+                        echo "Product Service: http://$PRODUCT_IP:8000/health"
+                        echo "Order Service: http://$ORDER_IP:8001/health"
+                        echo "Customer Service: http://$CUSTOMER_IP:8002/health"
+                        echo "=========================================="
+                        
+                        # Save deployment info for monitoring
+                        echo "DEPLOYMENT_DATE=$(date)" >> final_deployment_info.env
+                        echo "IMAGE_TAG=${IMAGE_TAG}" >> final_deployment_info.env
+                        echo "BUILD_NUMBER=${BUILD_NUMBER}" >> final_deployment_info.env
+                        cat service_ips.env >> final_deployment_info.env
+                        cat deployment_info.env >> final_deployment_info.env || true
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Cleaning up production deployment artifacts...'
+            script {
+                sh '''
+                    # Clean up Docker images to save space
+                    docker system prune -f
+                    
+                    # Clean up temporary files
+                    rm -f k8s/*-prod.yaml
+                    rm -f build.env service_ips.env deployment_info.env || true
+                '''
+            }
+        }
+        success {
+            echo 'Production deployment completed successfully!'
+            script {
+                if (!params.ROLLBACK) {
+                    // Archive final deployment information
+                    archiveArtifacts artifacts: 'final_deployment_info.env', fingerprint: true, allowEmptyArchive: true
+                    
+                    // Send success notification
+                    emailext (
+                        subject: "Production Deployment Successful - ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                        body: """
+                        Production deployment completed successfully!
+                        
+                        Build: ${env.BUILD_NUMBER}
+                        Image Tag: ${env.IMAGE_TAG}
+                        Deployment Strategy: ${params.DEPLOYMENT_STRATEGY}
+                        Deployment Date: ${new Date()}
+                        
+                        The production environment is now live with the new version.
+                        """,
+                        to: "${env.CHANGE_AUTHOR_EMAIL}"
+                    )
+                }
+            }
+        }
+        failure {
+            echo 'Production deployment failed!'
+            // Send failure notification
+            emailext (
+                subject: "Production Deployment Failed - ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: """
+                Production deployment has failed!
+                
+                Build: ${env.BUILD_NUMBER}
+                Image Tag: ${env.IMAGE_TAG}
+                
+                A rollback may have been automatically triggered.
+                Please check the Jenkins console output for details.
+                """,
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+    }
+}
