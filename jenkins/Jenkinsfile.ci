@@ -1,0 +1,338 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Azure credentials
+        AZURE_CREDENTIALS = credentials('azure-service-principal')
+        // ACR configuration
+        ACR_LOGIN_SERVER = credentials('acr-login-server')
+        AZURE_CONTAINER_REGISTRY = credentials('azure-container-registry')
+        // Database configuration for tests
+        POSTGRES_HOST = 'localhost'
+        POSTGRES_USER = 'postgres'
+        POSTGRES_PASSWORD = 'postgres'
+    }
+    
+    tools {
+        // Use Python tool if configured in Jenkins
+        // python 'python-3.10'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out repository...'
+                checkout scm
+            }
+        }
+        
+        stage('Setup Infrastructure') {
+            parallel {
+                stage('Terraform Plan') {
+                    steps {
+                        dir('infrastructure') {
+                            script {
+                                sh '''
+                                    echo "Setting up Terraform..."
+                                    terraform --version || (
+                                        echo "Installing Terraform..."
+                                        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+                                        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+                                        sudo apt update && sudo apt install terraform
+                                    )
+                                    
+                                    echo "Initializing Terraform..."
+                                    terraform init
+                                    
+                                    echo "Planning infrastructure for staging..."
+                                    terraform plan -var-file="staging.tfvars" -out=tfplan
+                                '''
+                            }
+                        }
+                    }
+                }
+                
+                stage('Setup Test Databases') {
+                    steps {
+                        script {
+                            sh '''
+                                echo "Starting PostgreSQL containers for testing..."
+                                
+                                # Stop any existing containers
+                                docker stop product_db_test order_db_test customer_db_test || true
+                                docker rm product_db_test order_db_test customer_db_test || true
+                                
+                                # Start test databases
+                                docker run -d --name product_db_test \
+                                    -e POSTGRES_USER=postgres \
+                                    -e POSTGRES_PASSWORD=postgres \
+                                    -e POSTGRES_DB=products \
+                                    -p 5432:5432 \
+                                    postgres:15
+                                
+                                docker run -d --name order_db_test \
+                                    -e POSTGRES_USER=postgres \
+                                    -e POSTGRES_PASSWORD=postgres \
+                                    -e POSTGRES_DB=orders \
+                                    -p 5433:5432 \
+                                    postgres:15
+                                
+                                docker run -d --name customer_db_test \
+                                    -e POSTGRES_USER=postgres \
+                                    -e POSTGRES_PASSWORD=postgres \
+                                    -e POSTGRES_DB=customers \
+                                    -p 5434:5432 \
+                                    postgres:15
+                                
+                                # Wait for databases to be ready
+                                echo "Waiting for databases to be ready..."
+                                sleep 30
+                                
+                                # Verify databases are running
+                                docker ps | grep postgres
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    sh '''
+                        echo "Installing Python dependencies..."
+                        python3 -m pip install --upgrade pip
+                        
+                        # Install dependencies for each service
+                        for req in backend/*/requirements.txt; do
+                            echo "Installing dependencies from $req"
+                            python3 -m pip install -r "$req"
+                        done
+                        
+                        # Install CI tools
+                        python3 -m pip install pytest httpx
+                    '''
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            parallel {
+                stage('Product Service Tests') {
+                    steps {
+                        dir('backend/product_service') {
+                            script {
+                                sh '''
+                                    echo "Running product service tests..."
+                                    export POSTGRES_HOST=localhost
+                                    export POSTGRES_PORT=5432
+                                    export POSTGRES_DB=products
+                                    export POSTGRES_USER=postgres
+                                    export POSTGRES_PASSWORD=postgres
+                                    
+                                    python3 -m pytest tests --maxfail=1 --disable-warnings -q --junitxml=../../test-results-product.xml
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'test-results-product.xml'
+                        }
+                    }
+                }
+                
+                stage('Order Service Tests') {
+                    steps {
+                        dir('backend/order_service') {
+                            script {
+                                sh '''
+                                    echo "Running order service tests..."
+                                    export POSTGRES_HOST=localhost
+                                    export POSTGRES_PORT=5433
+                                    export POSTGRES_DB=orders
+                                    export POSTGRES_USER=postgres
+                                    export POSTGRES_PASSWORD=postgres
+                                    
+                                    python3 -m pytest tests --maxfail=1 --disable-warnings -q --junitxml=../../test-results-order.xml
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'test-results-order.xml'
+                        }
+                    }
+                }
+                
+                stage('Customer Service Tests') {
+                    steps {
+                        dir('backend/customer_service') {
+                            script {
+                                sh '''
+                                    echo "Running customer service tests..."
+                                    export POSTGRES_HOST=localhost
+                                    export POSTGRES_PORT=5434
+                                    export POSTGRES_DB=customers
+                                    export POSTGRES_USER=postgres
+                                    export POSTGRES_PASSWORD=postgres
+                                    
+                                    python3 -m pytest tests --maxfail=1 --disable-warnings -q --junitxml=../../test-results-customer.xml
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'test-results-customer.xml'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy Infrastructure') {
+            when {
+                allOf {
+                    branch 'testing'
+                    expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
+                }
+            }
+            steps {
+                dir('infrastructure') {
+                    script {
+                        withCredentials([
+                            azureServicePrincipal('azure-service-principal')
+                        ]) {
+                            sh '''
+                                echo "Applying Terraform configuration..."
+                                export ARM_CLIENT_ID="${AZURE_CLIENT_ID}"
+                                export ARM_CLIENT_SECRET="${AZURE_CLIENT_SECRET}"
+                                export ARM_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID}"
+                                export ARM_TENANT_ID="${AZURE_TENANT_ID}"
+                                
+                                terraform apply -auto-approve tfplan
+                                
+                                # Extract outputs for use in later stages
+                                terraform output -json > ../terraform-outputs.json
+                                
+                                # Set environment variables for next stages
+                                echo "RESOURCE_GROUP_NAME=$(terraform output -raw resource_group_name)" >> ../build.env
+                                echo "ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)" >> ../build.env
+                                echo "AKS_CLUSTER_NAME=$(terraform output -raw aks_cluster_name)" >> ../build.env
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build and Push Images') {
+            when {
+                allOf {
+                    branch 'testing'
+                    expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
+                }
+            }
+            parallel {
+                stage('Product Service Image') {
+                    steps {
+                        script {
+                            sh '''
+                                # Source the build environment
+                                source build.env
+                                
+                                echo "Building product service image..."
+                                docker build -t ${ACR_LOGIN_SERVER}/product_service:${BUILD_NUMBER} ./backend/product_service/
+                                docker tag ${ACR_LOGIN_SERVER}/product_service:${BUILD_NUMBER} ${ACR_LOGIN_SERVER}/product_service:latest
+                                
+                                echo "Logging into ACR..."
+                                az acr login --name ${AZURE_CONTAINER_REGISTRY}
+                                
+                                echo "Pushing product service image..."
+                                docker push ${ACR_LOGIN_SERVER}/product_service:${BUILD_NUMBER}
+                                docker push ${ACR_LOGIN_SERVER}/product_service:latest
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Order Service Image') {
+                    steps {
+                        script {
+                            sh '''
+                                # Source the build environment
+                                source build.env
+                                
+                                echo "Building order service image..."
+                                docker build -t ${ACR_LOGIN_SERVER}/order_service:${BUILD_NUMBER} ./backend/order_service/
+                                docker tag ${ACR_LOGIN_SERVER}/order_service:${BUILD_NUMBER} ${ACR_LOGIN_SERVER}/order_service:latest
+                                
+                                echo "Logging into ACR..."
+                                az acr login --name ${AZURE_CONTAINER_REGISTRY}
+                                
+                                echo "Pushing order service image..."
+                                docker push ${ACR_LOGIN_SERVER}/order_service:${BUILD_NUMBER}
+                                docker push ${ACR_LOGIN_SERVER}/order_service:latest
+                            '''
+                        }
+                    }
+                }
+                
+                stage('Customer Service Image') {
+                    steps {
+                        script {
+                            sh '''
+                                # Source the build environment
+                                source build.env
+                                
+                                echo "Building customer service image..."
+                                docker build -t ${ACR_LOGIN_SERVER}/customer_service:${BUILD_NUMBER} ./backend/customer_service/
+                                docker tag ${ACR_LOGIN_SERVER}/customer_service:${BUILD_NUMBER} ${ACR_LOGIN_SERVER}/customer_service:latest
+                                
+                                echo "Logging into ACR..."
+                                az acr login --name ${AZURE_CONTAINER_REGISTRY}
+                                
+                                echo "Pushing customer service image..."
+                                docker push ${ACR_LOGIN_SERVER}/customer_service:${BUILD_NUMBER}
+                                docker push ${ACR_LOGIN_SERVER}/customer_service:latest
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Cleaning up...'
+            script {
+                sh '''
+                    # Clean up test containers
+                    docker stop product_db_test order_db_test customer_db_test || true
+                    docker rm product_db_test order_db_test customer_db_test || true
+                    
+                    # Clean up Docker images to save space
+                    docker system prune -f
+                '''
+            }
+        }
+        success {
+            echo 'CI Pipeline completed successfully!'
+            // Archive build artifacts
+            archiveArtifacts artifacts: 'terraform-outputs.json,build.env', fingerprint: true
+        }
+        failure {
+            echo 'CI Pipeline failed!'
+            // Send notifications
+            emailext (
+                subject: "CI Pipeline Failed - ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: "The CI pipeline has failed. Please check the Jenkins console output for details.",
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+    }
+}

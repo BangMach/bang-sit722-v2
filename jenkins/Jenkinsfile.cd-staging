@@ -1,0 +1,437 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Azure credentials
+        AZURE_CREDENTIALS = credentials('azure-service-principal')
+        // ACR configuration
+        ACR_LOGIN_SERVER = credentials('acr-login-server')
+        AZURE_CONTAINER_REGISTRY = credentials('azure-container-registry')
+        // Staging environment
+        STAGING_RESOURCE_GROUP = credentials('staging-resource-group')
+        STAGING_AKS_CLUSTER = credentials('staging-aks-cluster')
+        
+        // Build information
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        IMAGE_TAG = "latest"  // Can be changed to use specific build numbers
+    }
+    
+    parameters {
+        choice(
+            name: 'DEPLOY_ACTION',
+            choices: ['deploy', 'destroy'],
+            description: 'Choose whether to deploy or destroy the staging environment'
+        )
+        string(
+            name: 'CI_BUILD_NUMBER',
+            defaultValue: '',
+            description: 'CI build number to deploy (leave empty for latest)'
+        )
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out repository...'
+                checkout scm
+            }
+        }
+        
+        stage('Setup Environment') {
+            steps {
+                script {
+                    // Load terraform outputs from CI build if available
+                    if (fileExists('terraform-outputs.json')) {
+                        def outputs = readJSON file: 'terraform-outputs.json'
+                        env.RESOURCE_GROUP_NAME = outputs.resource_group_name.value
+                        env.ACR_LOGIN_SERVER = outputs.acr_login_server.value
+                        env.AKS_CLUSTER_NAME = outputs.aks_cluster_name.value
+                    } else {
+                        // Fallback to getting outputs from Terraform state
+                        dir('infrastructure') {
+                            withCredentials([azureServicePrincipal('azure-service-principal')]) {
+                                sh '''
+                                    export ARM_CLIENT_ID="${AZURE_CLIENT_ID}"
+                                    export ARM_CLIENT_SECRET="${AZURE_CLIENT_SECRET}"
+                                    export ARM_SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID}"
+                                    export ARM_TENANT_ID="${AZURE_TENANT_ID}"
+                                    
+                                    terraform init
+                                    terraform refresh -var-file="staging.tfvars"
+                                    
+                                    echo "RESOURCE_GROUP_NAME=$(terraform output -raw resource_group_name)" >> ../build.env
+                                    echo "ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)" >> ../build.env
+                                    echo "AKS_CLUSTER_NAME=$(terraform output -raw aks_cluster_name)" >> ../build.env
+                                '''
+                            }
+                        }
+                    }
+                    
+                    // Set image tag based on parameter
+                    if (params.CI_BUILD_NUMBER) {
+                        env.IMAGE_TAG = params.CI_BUILD_NUMBER
+                    }
+                }
+            }
+        }
+        
+        stage('Azure Login and Setup') {
+            steps {
+                script {
+                    withCredentials([azureServicePrincipal('azure-service-principal')]) {
+                        sh '''
+                            echo "Logging into Azure..."
+                            az login --service-principal \
+                                --username "${AZURE_CLIENT_ID}" \
+                                --password "${AZURE_CLIENT_SECRET}" \
+                                --tenant "${AZURE_TENANT_ID}"
+                            
+                            echo "Setting up kubectl context..."
+                            source build.env || true
+                            az aks get-credentials \
+                                --resource-group "${RESOURCE_GROUP_NAME:-${STAGING_RESOURCE_GROUP}}" \
+                                --name "${AKS_CLUSTER_NAME:-${STAGING_AKS_CLUSTER}}" \
+                                --overwrite-existing
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            when {
+                expression { params.DEPLOY_ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Deploying to staging environment..."
+                        
+                        # Source environment variables
+                        source build.env || true
+                        
+                        # Set ACR server for substitution
+                        export ACR="${ACR_LOGIN_SERVER:-${AZURE_CONTAINER_REGISTRY}}"
+                        
+                        # Substitute ACR in YAML files
+                        envsubst < k8s/product-service.yaml > k8s/product-service-substituted.yaml
+                        envsubst < k8s/order-service.yaml > k8s/order-service-substituted.yaml
+                        envsubst < k8s/customer-service.yaml > k8s/customer-service-substituted.yaml
+                        
+                        # Update image tags if specific build number provided
+                        if [ ! -z "${IMAGE_TAG}" ] && [ "${IMAGE_TAG}" != "latest" ]; then
+                            sed -i "s/:latest/:${IMAGE_TAG}/g" k8s/*-substituted.yaml
+                        fi
+                        
+                        echo "Deploying backend infrastructure..."
+                        kubectl apply -f k8s/configmaps.yaml
+                        kubectl apply -f k8s/secrets.yaml
+                        kubectl apply -f k8s/product-db.yaml
+                        kubectl apply -f k8s/order-db.yaml
+                        kubectl apply -f k8s/customer-db.yaml
+                        kubectl apply -f k8s/rabbitmq.yaml
+                        
+                        echo "Waiting for databases to be ready..."
+                        kubectl wait --for=condition=ready pod -l app=product-db --timeout=300s
+                        kubectl wait --for=condition=ready pod -l app=order-db --timeout=300s
+                        kubectl wait --for=condition=ready pod -l app=customer-db --timeout=300s
+                        
+                        echo "Deploying backend microservices..."
+                        kubectl apply -f k8s/product-service-substituted.yaml
+                        kubectl apply -f k8s/order-service-substituted.yaml
+                        kubectl apply -f k8s/customer-service-substituted.yaml
+                        
+                        echo "Waiting for services to be ready..."
+                        kubectl wait --for=condition=available deployment/product-service --timeout=300s
+                        kubectl wait --for=condition=available deployment/order-service --timeout=300s
+                        kubectl wait --for=condition=available deployment/customer-service --timeout=300s
+                    '''
+                }
+            }
+        }
+        
+        stage('Get LoadBalancer IPs') {
+            when {
+                expression { params.DEPLOY_ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Waiting for LoadBalancer IPs..."
+                        
+                        # Function to get external IP
+                        get_external_ip() {
+                            local service_name=$1
+                            local max_attempts=20
+                            local attempt=1
+                            
+                            while [ $attempt -le $max_attempts ]; do
+                                IP=$(kubectl get svc $service_name -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+                                if [ ! -z "$IP" ] && [ "$IP" != "null" ]; then
+                                    echo $IP
+                                    return 0
+                                fi
+                                echo "Attempt $attempt: Waiting for $service_name IP..."
+                                sleep 15
+                                attempt=$((attempt + 1))
+                            done
+                            echo "Failed to get IP for $service_name"
+                            return 1
+                        }
+                        
+                        # Get IPs for all services
+                        PRODUCT_IP=$(get_external_ip "product-service-w05-aks")
+                        ORDER_IP=$(get_external_ip "order-service-w05-aks")
+                        CUSTOMER_IP=$(get_external_ip "customer-service-w05-aks")
+                        
+                        # Validate IPs
+                        if [ -z "$PRODUCT_IP" ] || [ -z "$ORDER_IP" ] || [ -z "$CUSTOMER_IP" ]; then
+                            echo "Error: Failed to retrieve all LoadBalancer IPs"
+                            kubectl get services
+                            exit 1
+                        fi
+                        
+                        echo "Retrieved IPs:"
+                        echo "PRODUCT_IP=$PRODUCT_IP"
+                        echo "ORDER_IP=$ORDER_IP"
+                        echo "CUSTOMER_IP=$CUSTOMER_IP"
+                        
+                        # Save IPs for frontend deployment
+                        echo "PRODUCT_IP=$PRODUCT_IP" >> service_ips.env
+                        echo "ORDER_IP=$ORDER_IP" >> service_ips.env
+                        echo "CUSTOMER_IP=$CUSTOMER_IP" >> service_ips.env
+                    '''
+                    
+                    // Archive the service IPs for later use
+                    archiveArtifacts artifacts: 'service_ips.env', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Deploy Frontend') {
+            when {
+                expression { params.DEPLOY_ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Deploying frontend..."
+                        
+                        # Source the service IPs
+                        source service_ips.env
+                        
+                        # Update frontend configuration with backend URLs
+                        cp frontend/main.js frontend/main.js.bak
+                        sed -i "s|_PRODUCT_API_URL_|http://$PRODUCT_IP:8000|g" frontend/main.js
+                        sed -i "s|_ORDER_API_URL_|http://$ORDER_IP:8001|g" frontend/main.js
+                        sed -i "s|_CUSTOMER_API_URL_|http://$CUSTOMER_IP:8002|g" frontend/main.js
+                        
+                        # Validate replacement
+                        if grep -q "_.*_API_URL_" frontend/main.js; then
+                            echo "Error: Some placeholders were not replaced"
+                            cat frontend/main.js | grep "_.*_API_URL_"
+                            exit 1
+                        fi
+                        
+                        echo "Building and pushing frontend image..."
+                        az acr login --name ${AZURE_CONTAINER_REGISTRY}
+                        
+                        docker build -t ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} ./frontend/
+                        docker push ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG}
+                        
+                        # Substitute ACR in frontend YAML
+                        export ACR="${ACR_LOGIN_SERVER}"
+                        envsubst < k8s/frontend.yaml > k8s/frontend-substituted.yaml
+                        
+                        # Update image tag if specified
+                        if [ "${IMAGE_TAG}" != "latest" ]; then
+                            sed -i "s/:latest/:${IMAGE_TAG}/g" k8s/frontend-substituted.yaml
+                        fi
+                        
+                        # Deploy frontend
+                        kubectl apply -f k8s/frontend-substituted.yaml
+                        kubectl wait --for=condition=available deployment/frontend --timeout=300s
+                        
+                        # Get frontend URL
+                        FRONTEND_IP=$(kubectl get svc frontend-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                        if [ ! -z "$FRONTEND_IP" ]; then
+                            echo "Frontend deployed successfully!"
+                            echo "Frontend URL: http://$FRONTEND_IP"
+                            echo "FRONTEND_URL=http://$FRONTEND_IP" >> deployment_info.env
+                        fi
+                        
+                        # Restore original main.js
+                        mv frontend/main.js.bak frontend/main.js
+                    '''
+                }
+            }
+        }
+        
+        stage('Health Checks') {
+            when {
+                expression { params.DEPLOY_ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Performing health checks..."
+                        
+                        source service_ips.env
+                        
+                        # Function to check service health
+                        check_service_health() {
+                            local service_name=$1
+                            local service_ip=$2
+                            local service_port=$3
+                            local max_attempts=10
+                            local attempt=1
+                            
+                            while [ $attempt -le $max_attempts ]; do
+                                echo "Health check attempt $attempt for $service_name..."
+                                if curl -f -s "http://$service_ip:$service_port/health" > /dev/null; then
+                                    echo "$service_name is healthy!"
+                                    return 0
+                                fi
+                                sleep 10
+                                attempt=$((attempt + 1))
+                            done
+                            echo "$service_name health check failed!"
+                            return 1
+                        }
+                        
+                        # Check health of all services
+                        check_service_health "product-service" "$PRODUCT_IP" "8000"
+                        check_service_health "order-service" "$ORDER_IP" "8001"  
+                        check_service_health "customer-service" "$CUSTOMER_IP" "8002"
+                        
+                        echo "All services are healthy!"
+                    '''
+                }
+            }
+        }
+        
+        stage('Manual Testing Window') {
+            when {
+                expression { params.DEPLOY_ACTION == 'deploy' }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "=========================================="
+                        echo "STAGING ENVIRONMENT DEPLOYED SUCCESSFULLY"
+                        echo "=========================================="
+                        
+                        source service_ips.env
+                        source deployment_info.env || true
+                        
+                        echo "Service URLs:"
+                        echo "Product Service: http://$PRODUCT_IP:8000"
+                        echo "Order Service: http://$ORDER_IP:8001"
+                        echo "Customer Service: http://$CUSTOMER_IP:8002"
+                        if [ ! -z "$FRONTEND_URL" ]; then
+                            echo "Frontend: $FRONTEND_URL"
+                        fi
+                        echo ""
+                        echo "Health Check URLs:"
+                        echo "Product Service: http://$PRODUCT_IP:8000/health"
+                        echo "Order Service: http://$ORDER_IP:8001/health"
+                        echo "Customer Service: http://$CUSTOMER_IP:8002/health"
+                        echo "=========================================="
+                        
+                        # Wait for manual testing (2 minutes)
+                        echo "Waiting 2 minutes for manual testing..."
+                        sleep 120
+                    '''
+                    
+                    // Archive deployment information
+                    archiveArtifacts artifacts: 'deployment_info.env', fingerprint: true, allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Destroy Staging Environment') {
+            when {
+                anyOf {
+                    expression { params.DEPLOY_ACTION == 'destroy' }
+                    expression { params.DEPLOY_ACTION == 'deploy' }  // Always cleanup after deploy
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "Destroying staging environment..."
+                        
+                        # Delete all Kubernetes resources
+                        kubectl delete -f k8s/frontend.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/customer-service.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/order-service.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/product-service.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/rabbitmq.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/customer-db.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/order-db.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/product-db.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/secrets.yaml --ignore-not-found=true
+                        kubectl delete -f k8s/configmaps.yaml --ignore-not-found=true
+                        
+                        # Clean up any remaining pods
+                        kubectl delete pods --all --grace-period=0 --force || true
+                        
+                        echo "Staging environment destroyed successfully!"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Cleaning up build artifacts...'
+            script {
+                sh '''
+                    # Clean up Docker images to save space
+                    docker system prune -f
+                    
+                    # Clean up temporary files
+                    rm -f k8s/*-substituted.yaml
+                    rm -f build.env service_ips.env deployment_info.env || true
+                '''
+            }
+        }
+        success {
+            echo 'CD Staging Pipeline completed successfully!'
+            script {
+                if (params.DEPLOY_ACTION == 'deploy') {
+                    // Send success notification with deployment info
+                    emailext (
+                        subject: "Staging Deployment Successful - ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                        body: """
+                        The staging environment has been deployed successfully!
+                        
+                        Build: ${env.BUILD_NUMBER}
+                        Image Tag: ${env.IMAGE_TAG}
+                        
+                        The environment was automatically destroyed after testing.
+                        """,
+                        to: "${env.CHANGE_AUTHOR_EMAIL}"
+                    )
+                }
+            }
+        }
+        failure {
+            echo 'CD Staging Pipeline failed!'
+            // Attempt cleanup on failure
+            script {
+                sh '''
+                    echo "Attempting emergency cleanup..."
+                    kubectl delete pods --all --grace-period=0 --force || true
+                '''
+            }
+            // Send failure notification
+            emailext (
+                subject: "Staging Deployment Failed - ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: "The staging deployment has failed. Please check the Jenkins console output for details.",
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+    }
+}

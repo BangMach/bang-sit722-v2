@@ -164,6 +164,64 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker
+.dockerignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Terraform files (from infrastructure/.gitignore)
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+.terraform/
+.terraform.lock.hcl
+
+# Azure and Jenkins configuration files (contain sensitive data)
+azure-config.txt
+jenkins-jobs/
+*.pem
+*.key
+
+# Build artifacts
+build.env
+service_ips.env
+deployment_info.env
+final_deployment_info.env
+terraform-outputs.json
+backup/
+
+# Test results
+test-results-*.xml
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Log files
+*.log
+
 # pytype static type analyzer
 .pytype/
 
